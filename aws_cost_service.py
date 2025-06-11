@@ -302,9 +302,11 @@ class AWSCostService:
                             monthly_data[month] = 0
                         monthly_data[month] += cost
             
-            # Get resource-level breakdown if available
+            # Get instance-level breakdown using valid dimensions
+            resource_breakdown = []
             try:
-                resource_response = self.cost_explorer.get_cost_and_usage(
+                # Try to get breakdown by instance type (works for EC2, RDS, etc.)
+                instance_response = self.cost_explorer.get_cost_and_usage(
                     TimePeriod={
                         'Start': start_date.strftime('%Y-%m-%d'),
                         'End': end_date.strftime('%Y-%m-%d')
@@ -314,7 +316,7 @@ class AWSCostService:
                     GroupBy=[
                         {
                             'Type': 'DIMENSION',
-                            'Key': 'RESOURCE_ID'
+                            'Key': 'INSTANCE_TYPE'
                         }
                     ],
                     Filter={
@@ -325,25 +327,105 @@ class AWSCostService:
                     }
                 )
                 
-                resource_breakdown = []
-                for result in resource_response['ResultsByTime']:
+                for result in instance_response['ResultsByTime']:
                     for group in result['Groups']:
-                        resource_id = group['Keys'][0] if group['Keys'] else 'Unknown Resource'
+                        instance_type = group['Keys'][0] if group['Keys'] else 'Unknown Type'
                         cost = float(group['Metrics']['BlendedCost']['Amount'])
                         
-                        if cost > 0 and resource_id != 'NoResourceId':
+                        if cost > 0 and instance_type not in ['NoInstanceType', '']:
                             resource_breakdown.append({
-                                'Resource_ID': resource_id,
+                                'Resource_Type': instance_type,
                                 'Cost': f"${cost:,.2f}",
-                                'Cost_Numeric': cost
+                                'Cost_Numeric': cost,
+                                'Category': 'Instance Type'
                             })
                 
-                # Sort by cost (descending)
-                resource_breakdown.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+            except Exception as e:
+                logger.debug(f"Instance type grouping not available for {service_name}: {str(e)}")
+            
+            # Try to get breakdown by availability zone
+            try:
+                az_response = self.cost_explorer.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='MONTHLY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {
+                            'Type': 'DIMENSION',
+                            'Key': 'AZ'
+                        }
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': [service_name]
+                        }
+                    }
+                )
+                
+                for result in az_response['ResultsByTime']:
+                    for group in result['Groups']:
+                        az = group['Keys'][0] if group['Keys'] else 'Unknown AZ'
+                        cost = float(group['Metrics']['BlendedCost']['Amount'])
+                        
+                        if cost > 0 and az not in ['NoAZ', '']:
+                            resource_breakdown.append({
+                                'Resource_Type': az,
+                                'Cost': f"${cost:,.2f}",
+                                'Cost_Numeric': cost,
+                                'Category': 'Availability Zone'
+                            })
                 
             except Exception as e:
-                logger.warning(f"Could not fetch resource-level data for {service_name}: {str(e)}")
-                resource_breakdown = []
+                logger.debug(f"AZ grouping not available for {service_name}: {str(e)}")
+            
+            # Try to get breakdown by platform (for EC2)
+            try:
+                platform_response = self.cost_explorer.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='MONTHLY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {
+                            'Type': 'DIMENSION',
+                            'Key': 'PLATFORM'
+                        }
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': [service_name]
+                        }
+                    }
+                )
+                
+                for result in platform_response['ResultsByTime']:
+                    for group in result['Groups']:
+                        platform = group['Keys'][0] if group['Keys'] else 'Unknown Platform'
+                        cost = float(group['Metrics']['BlendedCost']['Amount'])
+                        
+                        if cost > 0 and platform not in ['NoPlatform', '']:
+                            resource_breakdown.append({
+                                'Resource_Type': platform,
+                                'Cost': f"${cost:,.2f}",
+                                'Cost_Numeric': cost,
+                                'Category': 'Platform'
+                            })
+                
+            except Exception as e:
+                logger.debug(f"Platform grouping not available for {service_name}: {str(e)}")
+            
+            # Sort by cost (descending)
+            resource_breakdown.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+            
+            if not resource_breakdown:
+                logger.warning(f"Could not fetch detailed resource data for {service_name} using available dimensions")
             
             # Sort usage breakdown by cost
             usage_breakdown.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
@@ -790,9 +872,83 @@ class AWSCostService:
             else:
                 month_end = month_start.replace(month=month_start.month + 1, day=1)
             
-            # Get resource-level breakdown with more details
+            # Get enhanced resource breakdown using valid dimensions
+            enhanced_resources = []
+            
+            # Try multiple valid dimensions to get resource-level insights
+            dimensions_to_try = [
+                ('INSTANCE_TYPE', 'Instance Type'),
+                ('AZ', 'Availability Zone'), 
+                ('PLATFORM', 'Platform'),
+                ('OPERATION', 'Operation'),
+                ('REGION', 'Region')
+            ]
+            
+            for dimension_key, dimension_name in dimensions_to_try:
+                try:
+                    resource_response = self.cost_explorer.get_cost_and_usage(
+                        TimePeriod={
+                            'Start': month_start.strftime('%Y-%m-%d'),
+                            'End': month_end.strftime('%Y-%m-%d')
+                        },
+                        Granularity='MONTHLY',
+                        Metrics=['BlendedCost', 'UsageQuantity'],
+                        GroupBy=[
+                            {
+                                'Type': 'DIMENSION',
+                                'Key': dimension_key
+                            }
+                        ],
+                        Filter={
+                            'And': [
+                                {
+                                    'Dimensions': {
+                                        'Key': 'SERVICE',
+                                        'Values': [service_name]
+                                    }
+                                },
+                                {
+                                    'Dimensions': {
+                                        'Key': 'USAGE_TYPE',
+                                        'Values': [usage_type]
+                                    }
+                                }
+                            ]
+                        }
+                    )
+                    
+                    for result in resource_response['ResultsByTime']:
+                        for group in result['Groups']:
+                            resource_value = group['Keys'][0] if group['Keys'] else f'Unknown {dimension_name}'
+                            cost = float(group['Metrics']['BlendedCost']['Amount'])
+                            usage = float(group['Metrics']['UsageQuantity']['Amount'])
+                            
+                            if cost > 0 and resource_value not in [f'No{dimension_key}', '']:
+                                # Create a descriptive resource entry
+                                enhanced_resources.append({
+                                    'Resource_ID': f"{dimension_name}: {resource_value}",
+                                    'Resource_Name': resource_value,
+                                    'Resource_Type': dimension_name,
+                                    'Resource_State': 'Active',
+                                    'Region': resource_value if dimension_name == 'Region' else 'Multiple',
+                                    'Cost': f"${cost:,.2f}",
+                                    'Usage_Quantity': f"{usage:,.2f}",
+                                    'Cost_Numeric': cost,
+                                    'Usage_Numeric': usage,
+                                    'Tags': {},
+                                    'Owner': 'Unknown',
+                                    'Environment': 'Unknown',
+                                    'Project': 'Unknown',
+                                    'Category': dimension_name
+                                })
+                    
+                except Exception as e:
+                    logger.debug(f"Could not fetch {dimension_name} data: {str(e)}")
+                    continue
+            
+            # Try to get actual resource information using linked account dimension
             try:
-                resource_response = self.cost_explorer.get_cost_and_usage(
+                account_response = self.cost_explorer.get_cost_and_usage(
                     TimePeriod={
                         'Start': month_start.strftime('%Y-%m-%d'),
                         'End': month_end.strftime('%Y-%m-%d')
@@ -802,7 +958,7 @@ class AWSCostService:
                     GroupBy=[
                         {
                             'Type': 'DIMENSION',
-                            'Key': 'RESOURCE_ID'
+                            'Key': 'LINKED_ACCOUNT'
                         }
                     ],
                     Filter={
@@ -823,42 +979,49 @@ class AWSCostService:
                     }
                 )
                 
-                enhanced_resources = []
-                for result in resource_response['ResultsByTime']:
+                for result in account_response['ResultsByTime']:
                     for group in result['Groups']:
-                        resource_id = group['Keys'][0] if group['Keys'] else 'Unknown Resource'
+                        account_id = group['Keys'][0] if group['Keys'] else 'Unknown Account'
                         cost = float(group['Metrics']['BlendedCost']['Amount'])
                         usage = float(group['Metrics']['UsageQuantity']['Amount'])
                         
-                        if cost > 0 and resource_id != 'NoResourceId':
-                            # Get detailed resource information
-                            resource_details = self.get_resource_details(resource_id, service_name)
-                            
+                        if cost > 0:
                             enhanced_resources.append({
-                                'Resource_ID': resource_id,
-                                'Resource_Name': resource_details['name'],
-                                'Resource_Type': resource_details['type'],
-                                'Resource_State': resource_details['state'],
-                                'Region': resource_details['region'],
+                                'Resource_ID': f"Account: {account_id}",
+                                'Resource_Name': f"AWS Account {account_id}",
+                                'Resource_Type': 'AWS Account',
+                                'Resource_State': 'Active',
+                                'Region': 'Multiple',
                                 'Cost': f"${cost:,.2f}",
                                 'Usage_Quantity': f"{usage:,.2f}",
                                 'Cost_Numeric': cost,
                                 'Usage_Numeric': usage,
-                                'Tags': resource_details['tags'],
-                                'Owner': resource_details['tags'].get('Owner', 'Unknown'),
-                                'Environment': resource_details['tags'].get('Environment', 'Unknown'),
-                                'Project': resource_details['tags'].get('Project', 'Unknown')
+                                'Tags': {},
+                                'Owner': 'Unknown',
+                                'Environment': 'Unknown',
+                                'Project': 'Unknown',
+                                'Category': 'Account'
                             })
-                
-                # Sort by cost (descending)
-                enhanced_resources.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
-                
-                # Update the basic details with enhanced resource information
-                basic_details['enhanced_resources'] = enhanced_resources[:50]  # Top 50 resources
-                
+                            
             except Exception as e:
-                logger.warning(f"Could not fetch enhanced resource data: {str(e)}")
-                basic_details['enhanced_resources'] = []
+                logger.debug(f"Could not fetch linked account data: {str(e)}")
+            
+            # Sort by cost (descending) and remove duplicates
+            enhanced_resources.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+            
+            # Remove duplicate entries based on resource name and cost
+            seen = set()
+            unique_resources = []
+            for resource in enhanced_resources:
+                key = (resource['Resource_Name'], resource['Cost_Numeric'])
+                if key not in seen:
+                    seen.add(key)
+                    unique_resources.append(resource)
+            
+            basic_details['enhanced_resources'] = unique_resources[:50]  # Top 50 unique resources
+            
+            if not enhanced_resources:
+                logger.warning(f"Could not fetch enhanced resource data using available dimensions")
             
             # Add cost attribution analysis
             if basic_details['enhanced_resources']:

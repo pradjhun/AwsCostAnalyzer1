@@ -565,19 +565,29 @@ with tab5:
                     st.subheader("🏗️ Resource-Level Cost Analysis")
                     
                     df_resources = pd.DataFrame(detailed_data['resource_breakdown'])
-                    st.write("**Top Cost Resources:**")
-                    display_resources = df_resources.drop('Cost_Numeric', axis=1)
+                    st.write("**Cost Breakdown by Resource Attributes:**")
+                    
+                    # Display available columns, showing Category if present
+                    if 'Category' in df_resources.columns:
+                        display_columns = ['Resource_Type', 'Cost', 'Category']
+                        available_columns = [col for col in display_columns if col in df_resources.columns]
+                        display_resources = df_resources[available_columns]
+                    else:
+                        display_resources = df_resources.drop('Cost_Numeric', axis=1)
+                    
                     st.dataframe(display_resources, use_container_width=True, hide_index=True)
                     
                     # Resource cost bar chart
                     if len(df_resources) > 1:
+                        y_column = 'Resource_Type' if 'Resource_Type' in df_resources.columns else 'Resource_ID'
                         fig_resources = px.bar(
                             df_resources.head(10),
                             x='Cost_Numeric',
-                            y='Resource_ID',
+                            y=y_column,
                             orientation='h',
-                            title=f"Top Resources by Cost - {selected_service}",
-                            labels={'Cost_Numeric': 'Cost (USD)', 'Resource_ID': 'Resource ID'}
+                            title=f"Cost Analysis by Resource Attributes - {selected_service}",
+                            labels={'Cost_Numeric': 'Cost (USD)', y_column: 'Resource Attribute'},
+                            color='Category' if 'Category' in df_resources.columns else None
                         )
                         fig_resources.update_traces(
                             hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<extra></extra>'

@@ -1,5 +1,6 @@
 import boto3
 import os
+import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import logging
@@ -854,6 +855,303 @@ class AWSCostService:
         except Exception as e:
             logger.error(f"Error getting resource names for {service_name}: {str(e)}")
             return []
+
+    def get_resource_level_cost_breakdown(self, service_name: str, usage_type: str, month: str, 
+                                        month_start: datetime, month_end: datetime) -> Dict[str, Any]:
+        """
+        Get detailed resource-level cost breakdown combining actual resources with cost data
+        
+        Args:
+            service_name: AWS service name
+            usage_type: Usage type to analyze
+            month: Month string (YYYY-MM)
+            month_start: Start of month datetime
+            month_end: End of month datetime
+            
+        Returns:
+            Dictionary containing detailed resource cost breakdown
+        """
+        try:
+            logger.info(f"Generating resource-level cost breakdown for {service_name} - {usage_type}")
+            
+            breakdown = {
+                'service_name': service_name,
+                'usage_type': usage_type,
+                'month': month,
+                'resource_costs': [],
+                'daily_breakdown': [],
+                'hourly_patterns': [],
+                'cost_trends': {},
+                'optimization_opportunities': []
+            }
+            
+            # Get actual resources for this service
+            actual_resources = self.get_actual_resource_names(service_name, usage_type, month)
+            
+            # Get daily cost breakdown for the month
+            daily_response = self.cost_explorer.get_cost_and_usage(
+                TimePeriod={
+                    'Start': month_start.strftime('%Y-%m-%d'),
+                    'End': month_end.strftime('%Y-%m-%d')
+                },
+                Granularity='DAILY',
+                Metrics=['BlendedCost', 'UsageQuantity'],
+                Filter={
+                    'And': [
+                        {
+                            'Dimensions': {
+                                'Key': 'SERVICE',
+                                'Values': [service_name]
+                            }
+                        },
+                        {
+                            'Dimensions': {
+                                'Key': 'USAGE_TYPE',
+                                'Values': [usage_type]
+                            }
+                        }
+                    ]
+                }
+            )
+            
+            # Process daily costs
+            daily_costs = []
+            for result in daily_response['ResultsByTime']:
+                date = result['TimePeriod']['Start']
+                cost = float(result['Total']['BlendedCost']['Amount'])
+                usage = float(result['Total']['UsageQuantity']['Amount'])
+                
+                daily_costs.append({
+                    'date': date,
+                    'cost': cost,
+                    'usage': usage,
+                    'cost_formatted': f"${cost:,.2f}",
+                    'usage_formatted': f"{usage:,.2f}"
+                })
+            
+            breakdown['daily_breakdown'] = daily_costs
+            
+            # Analyze cost trends
+            if daily_costs:
+                costs_only = [d['cost'] for d in daily_costs]
+                breakdown['cost_trends'] = {
+                    'avg_daily_cost': sum(costs_only) / len(costs_only),
+                    'max_daily_cost': max(costs_only),
+                    'min_daily_cost': min(costs_only),
+                    'total_cost': sum(costs_only),
+                    'cost_variance': np.var(costs_only) if len(costs_only) > 1 else 0,
+                    'trend_direction': 'increasing' if costs_only[-1] > costs_only[0] else 'decreasing'
+                }
+            
+            # Match actual resources with cost data using multiple dimensions
+            resource_cost_mapping = []
+            
+            if actual_resources:
+                for resource in actual_resources:
+                    resource_name = resource.get('resource_name', 'Unknown')
+                    resource_id = resource.get('resource_id', 'Unknown')
+                    
+                    # Try to get cost data for this specific resource using different approaches
+                    estimated_cost = 0
+                    cost_confidence = 'Low'
+                    
+                    # For Amazon Q, try to correlate with application-level costs
+                    if 'Amazon Q' in service_name:
+                        app_name = resource.get('application', '')
+                        # Estimate cost based on total usage divided by number of resources
+                        if breakdown['cost_trends'].get('total_cost', 0) > 0:
+                            estimated_cost = breakdown['cost_trends']['total_cost'] / len(actual_resources)
+                            cost_confidence = 'Estimated'
+                    
+                    # For EC2, try to get instance-specific costs
+                    elif 'EC2' in service_name and resource.get('instance_type'):
+                        try:
+                            instance_cost_response = self.cost_explorer.get_cost_and_usage(
+                                TimePeriod={
+                                    'Start': month_start.strftime('%Y-%m-%d'),
+                                    'End': month_end.strftime('%Y-%m-%d')
+                                },
+                                Granularity='MONTHLY',
+                                Metrics=['BlendedCost'],
+                                GroupBy=[
+                                    {
+                                        'Type': 'DIMENSION',
+                                        'Key': 'INSTANCE_TYPE'
+                                    }
+                                ],
+                                Filter={
+                                    'And': [
+                                        {
+                                            'Dimensions': {
+                                                'Key': 'SERVICE',
+                                                'Values': [service_name]
+                                            }
+                                        },
+                                        {
+                                            'Dimensions': {
+                                                'Key': 'USAGE_TYPE',
+                                                'Values': [usage_type]
+                                            }
+                                        }
+                                    ]
+                                }
+                            )
+                            
+                            # Find matching instance type
+                            for result in instance_cost_response['ResultsByTime']:
+                                for group in result['Groups']:
+                                    if group['Keys'][0] == resource.get('instance_type'):
+                                        estimated_cost = float(group['Metrics']['BlendedCost']['Amount'])
+                                        cost_confidence = 'High'
+                                        break
+                        except Exception as e:
+                            logger.debug(f"Could not get instance-specific cost: {str(e)}")
+                    
+                    # Calculate cost per day for this resource
+                    daily_cost = estimated_cost / len(daily_costs) if daily_costs else 0
+                    
+                    resource_cost_mapping.append({
+                        'resource_name': resource_name,
+                        'resource_id': resource_id,
+                        'estimated_monthly_cost': estimated_cost,
+                        'estimated_daily_cost': daily_cost,
+                        'cost_confidence': cost_confidence,
+                        'cost_formatted': f"${estimated_cost:,.2f}",
+                        'daily_cost_formatted': f"${daily_cost:,.2f}",
+                        'resource_details': resource,
+                        'utilization_score': self._calculate_utilization_score(resource, daily_costs),
+                        'optimization_potential': self._identify_optimization_opportunities(resource, estimated_cost, daily_costs)
+                    })
+            
+            # Sort by estimated cost
+            resource_cost_mapping.sort(key=lambda x: x['estimated_monthly_cost'], reverse=True)
+            breakdown['resource_costs'] = resource_cost_mapping
+            
+            # Generate optimization recommendations
+            breakdown['optimization_opportunities'] = self._generate_resource_optimization_recommendations(
+                resource_cost_mapping, breakdown['cost_trends']
+            )
+            
+            logger.info(f"Generated cost breakdown for {len(resource_cost_mapping)} resources")
+            return breakdown
+            
+        except Exception as e:
+            logger.error(f"Error generating resource-level cost breakdown: {str(e)}")
+            return {
+                'service_name': service_name,
+                'usage_type': usage_type,
+                'month': month,
+                'resource_costs': [],
+                'daily_breakdown': [],
+                'cost_trends': {},
+                'optimization_opportunities': [],
+                'error': str(e)
+            }
+
+    def _calculate_utilization_score(self, resource: Dict[str, Any], daily_costs: List[Dict[str, Any]]) -> float:
+        """Calculate utilization score for a resource based on cost patterns"""
+        try:
+            if not daily_costs:
+                return 0.0
+            
+            # Simple utilization based on cost consistency
+            costs = [d['cost'] for d in daily_costs if d['cost'] > 0]
+            if not costs:
+                return 0.0
+            
+            # Higher variance = lower utilization score
+            avg_cost = sum(costs) / len(costs)
+            variance = sum((c - avg_cost) ** 2 for c in costs) / len(costs)
+            utilization = max(0, 100 - (variance / avg_cost * 100)) if avg_cost > 0 else 0
+            
+            return min(100, max(0, utilization))
+        except:
+            return 50.0  # Default moderate score
+
+    def _identify_optimization_opportunities(self, resource: Dict[str, Any], 
+                                           estimated_cost: float, daily_costs: List[Dict[str, Any]]) -> List[str]:
+        """Identify optimization opportunities for a resource"""
+        opportunities = []
+        
+        try:
+            if estimated_cost > 100:  # High cost resources
+                opportunities.append("High-cost resource - review necessity")
+            
+            if daily_costs:
+                costs = [d['cost'] for d in daily_costs if d['cost'] > 0]
+                if costs:
+                    zero_cost_days = len([d for d in daily_costs if d['cost'] == 0])
+                    if zero_cost_days > len(daily_costs) * 0.3:  # 30% zero usage
+                        opportunities.append("Low utilization - consider rightsizing")
+                    
+                    # Check for weekend patterns (if we have enough data)
+                    if len(costs) >= 7:
+                        weekend_avg = sum(costs[-2:]) / 2  # Last 2 days approximation
+                        weekday_avg = sum(costs[:-2]) / max(1, len(costs) - 2)
+                        if weekend_avg < weekday_avg * 0.5:
+                            opportunities.append("Weekend idle time - consider scheduling")
+            
+            # Service-specific recommendations
+            service_type = resource.get('resource_type', '').lower()
+            if 'ec2' in service_type or 'instance' in service_type:
+                opportunities.append("Consider Reserved Instances for steady workloads")
+            elif 's3' in service_type:
+                opportunities.append("Review storage class optimization")
+            elif 'lambda' in service_type:
+                opportunities.append("Optimize memory allocation and timeout settings")
+            
+        except Exception as e:
+            logger.debug(f"Error identifying optimization opportunities: {str(e)}")
+        
+        return opportunities[:3]  # Return top 3 opportunities
+
+    def _generate_resource_optimization_recommendations(self, resource_costs: List[Dict[str, Any]], 
+                                                      cost_trends: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate comprehensive optimization recommendations"""
+        recommendations = []
+        
+        try:
+            if not resource_costs:
+                return recommendations
+            
+            total_cost = cost_trends.get('total_cost', 0)
+            
+            # High cost resource recommendations
+            high_cost_resources = [r for r in resource_costs if r['estimated_monthly_cost'] > total_cost * 0.2]
+            if high_cost_resources:
+                recommendations.append({
+                    'type': 'High Cost Resources',
+                    'description': f"Found {len(high_cost_resources)} resources consuming >20% of total cost",
+                    'action': 'Review and optimize these high-impact resources first',
+                    'potential_savings': sum([r['estimated_monthly_cost'] * 0.1 for r in high_cost_resources]),
+                    'resources': [r['resource_name'] for r in high_cost_resources[:5]]
+                })
+            
+            # Low utilization recommendations
+            low_util_resources = [r for r in resource_costs if r['utilization_score'] < 30]
+            if low_util_resources:
+                recommendations.append({
+                    'type': 'Low Utilization',
+                    'description': f"Found {len(low_util_resources)} underutilized resources",
+                    'action': 'Consider rightsizing, scheduling, or terminating unused resources',
+                    'potential_savings': sum([r['estimated_monthly_cost'] * 0.3 for r in low_util_resources]),
+                    'resources': [r['resource_name'] for r in low_util_resources[:5]]
+                })
+            
+            # Cost trend recommendations
+            if cost_trends.get('trend_direction') == 'increasing':
+                recommendations.append({
+                    'type': 'Cost Trend Alert',
+                    'description': 'Costs are trending upward this month',
+                    'action': 'Investigate recent changes and implement cost controls',
+                    'potential_savings': cost_trends.get('avg_daily_cost', 0) * 5,  # 5 days of average cost
+                    'resources': []
+                })
+            
+        except Exception as e:
+            logger.debug(f"Error generating optimization recommendations: {str(e)}")
+        
+        return recommendations
     
     def get_enhanced_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
         """
@@ -1033,6 +1331,12 @@ class AWSCostService:
             
             basic_details['enhanced_resources'] = unique_resources[:50]  # Top 50 unique resources
             basic_details['actual_resources'] = actual_resources  # Add actual resource names
+            
+            # Get detailed resource-level cost breakdown
+            resource_cost_breakdown = self.get_resource_level_cost_breakdown(
+                service_name, usage_type, month, month_start, month_end
+            )
+            basic_details['resource_cost_breakdown'] = resource_cost_breakdown
             
             if not enhanced_resources:
                 logger.warning(f"Could not fetch enhanced resource data using available dimensions")

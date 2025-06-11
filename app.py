@@ -750,6 +750,118 @@ with tab5:
                         
                         st.markdown("---")
                     
+                    # Resource-level cost breakdown
+                    if enhanced_data.get('resource_cost_breakdown'):
+                        breakdown = enhanced_data['resource_cost_breakdown']
+                        
+                        st.subheader("💰 Detailed Resource-Level Cost Breakdown")
+                        
+                        # Cost trends summary
+                        if breakdown.get('cost_trends'):
+                            trends = breakdown['cost_trends']
+                            col_trend1, col_trend2, col_trend3, col_trend4 = st.columns(4)
+                            
+                            with col_trend1:
+                                st.metric("Total Monthly Cost", f"${trends.get('total_cost', 0):,.2f}")
+                            with col_trend2:
+                                st.metric("Avg Daily Cost", f"${trends.get('avg_daily_cost', 0):,.2f}")
+                            with col_trend3:
+                                st.metric("Cost Trend", trends.get('trend_direction', 'Unknown').title())
+                            with col_trend4:
+                                cost_variance = trends.get('cost_variance', 0)
+                                st.metric("Cost Variance", f"${cost_variance:,.2f}")
+                        
+                        # Resource cost breakdown table
+                        if breakdown.get('resource_costs'):
+                            st.write("**Individual Resource Costs:**")
+                            df_resource_costs = pd.DataFrame(breakdown['resource_costs'])
+                            
+                            # Select display columns
+                            display_cols = ['resource_name', 'resource_id', 'cost_formatted', 'daily_cost_formatted', 
+                                          'cost_confidence', 'utilization_score']
+                            available_cols = [col for col in display_cols if col in df_resource_costs.columns]
+                            df_display = df_resource_costs[available_cols]
+                            
+                            # Rename columns for better display
+                            column_mapping = {
+                                'resource_name': 'Resource Name',
+                                'resource_id': 'Resource ID',
+                                'cost_formatted': 'Monthly Cost',
+                                'daily_cost_formatted': 'Daily Cost',
+                                'cost_confidence': 'Confidence',
+                                'utilization_score': 'Utilization %'
+                            }
+                            df_display = df_display.rename(columns=column_mapping)
+                            
+                            st.dataframe(df_display, use_container_width=True, hide_index=True)
+                            
+                            # Resource cost visualization
+                            if len(df_resource_costs) > 1:
+                                fig_resource_costs = px.bar(
+                                    df_resource_costs.head(10),
+                                    x='estimated_monthly_cost',
+                                    y='resource_name',
+                                    orientation='h',
+                                    title="Resource Monthly Costs",
+                                    labels={'estimated_monthly_cost': 'Monthly Cost (USD)', 'resource_name': 'Resource Name'},
+                                    color='utilization_score',
+                                    color_continuous_scale='RdYlGn'
+                                )
+                                fig_resource_costs.update_traces(
+                                    hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<br>Utilization: %{marker.color:.1f}%<extra></extra>'
+                                )
+                                st.plotly_chart(fig_resource_costs, use_container_width=True)
+                        
+                        # Daily cost breakdown chart
+                        if breakdown.get('daily_breakdown'):
+                            st.write("**Daily Cost Pattern:**")
+                            df_daily = pd.DataFrame(breakdown['daily_breakdown'])
+                            
+                            fig_daily = px.line(
+                                df_daily,
+                                x='date',
+                                y='cost',
+                                title=f"Daily Cost Trend - {breakdown['usage_type']}",
+                                labels={'cost': 'Cost (USD)', 'date': 'Date'}
+                            )
+                            fig_daily.update_traces(
+                                hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
+                            )
+                            st.plotly_chart(fig_daily, use_container_width=True)
+                        
+                        # Optimization opportunities
+                        if breakdown.get('optimization_opportunities'):
+                            st.write("**🎯 Optimization Opportunities:**")
+                            for opp in breakdown['optimization_opportunities']:
+                                with st.expander(f"💡 {opp['type']} - Potential Savings: ${opp.get('potential_savings', 0):,.2f}"):
+                                    st.write(f"**Description:** {opp['description']}")
+                                    st.write(f"**Recommended Action:** {opp['action']}")
+                                    if opp.get('resources'):
+                                        st.write(f"**Affected Resources:** {', '.join(opp['resources'])}")
+                        
+                        # Individual resource optimization details
+                        if breakdown.get('resource_costs'):
+                            with st.expander("🔍 Individual Resource Optimization Details"):
+                                for resource in breakdown['resource_costs'][:5]:  # Top 5 resources
+                                    st.write(f"**{resource['resource_name']}** (ID: {resource['resource_id']})")
+                                    
+                                    col_opt1, col_opt2 = st.columns([2, 1])
+                                    with col_opt1:
+                                        if resource.get('optimization_potential'):
+                                            st.write("Optimization Opportunities:")
+                                            for opp in resource['optimization_potential']:
+                                                st.write(f"• {opp}")
+                                        else:
+                                            st.write("No specific optimization opportunities identified")
+                                    
+                                    with col_opt2:
+                                        st.metric("Monthly Cost", resource['cost_formatted'])
+                                        st.metric("Utilization", f"{resource['utilization_score']:.1f}%")
+                                    
+                                    st.markdown("---")
+                        
+                        st.markdown("---")
+                    
                     # Cost attribution summary
                     if 'cost_attribution' in enhanced_data:
                         attribution = enhanced_data['cost_attribution']

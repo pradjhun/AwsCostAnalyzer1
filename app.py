@@ -137,7 +137,7 @@ with col2:
 st.header("📊 Interactive Charts")
 
 # Create tabs for different chart types
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights", "🔍 Individual Service Analysis"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights", "🔍 Individual Service Analysis", "📅 Custom Date Range"])
 
 with tab1:
     st.subheader("Monthly Cost Trend")
@@ -722,6 +722,229 @@ with tab5:
                     st.rerun()
     else:
         st.info("Please refresh cost data first to enable service analysis")
+
+with tab6:
+    st.subheader("Custom Date Range Analysis")
+    
+    # Date range selector
+    col_date1, col_date2, col_date3 = st.columns([2, 2, 1])
+    
+    with col_date1:
+        start_date_input = st.date_input(
+            "Start Date",
+            value=datetime.now() - timedelta(days=180),  # Default to 6 months ago
+            max_value=datetime.now().date(),
+            help="Select the start date for cost analysis"
+        )
+    
+    with col_date2:
+        end_date_input = st.date_input(
+            "End Date",
+            value=datetime.now().date(),
+            max_value=datetime.now().date(),
+            help="Select the end date for cost analysis"
+        )
+    
+    with col_date3:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        if st.button("🔍 Analyze Custom Range", type="primary"):
+            # Validate date range
+            if start_date_input >= end_date_input:
+                st.error("Start date must be before end date")
+            elif (end_date_input - start_date_input).days > 365:
+                st.error("Date range cannot exceed 365 days")
+            elif start_date_input > datetime.now().date():
+                st.error("Start date cannot be in the future")
+            else:
+                with st.spinner("Fetching cost data for custom date range..."):
+                    try:
+                        cost_service = AWSCostService()
+                        
+                        # Convert dates to datetime objects
+                        custom_start = datetime.combine(start_date_input, datetime.min.time())
+                        custom_end = datetime.combine(end_date_input, datetime.min.time())
+                        
+                        # Get monthly costs for custom range
+                        custom_monthly_costs = cost_service.get_monthly_costs(custom_start, custom_end)
+                        
+                        # Get service breakdown for custom range
+                        custom_service_costs = cost_service.get_costs_by_service(custom_start, custom_end)
+                        
+                        # Get daily costs for custom range (if range is <= 31 days)
+                        custom_daily_costs = []
+                        if (end_date_input - start_date_input).days <= 31:
+                            custom_daily_costs = cost_service.get_daily_costs(custom_start, custom_end)
+                        
+                        # Store in session state
+                        st.session_state.custom_monthly_costs = custom_monthly_costs
+                        st.session_state.custom_service_costs = custom_service_costs
+                        st.session_state.custom_daily_costs = custom_daily_costs
+                        st.session_state.custom_date_range = {
+                            'start': start_date_input,
+                            'end': end_date_input,
+                            'days': (end_date_input - start_date_input).days
+                        }
+                        
+                        st.success(f"✅ Analysis completed for {start_date_input} to {end_date_input}")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error fetching custom date range data: {str(e)}")
+    
+    # Display custom range analysis results
+    if 'custom_monthly_costs' in st.session_state and st.session_state.custom_monthly_costs:
+        custom_range = st.session_state.custom_date_range
+        
+        st.markdown("---")
+        st.subheader(f"📊 Analysis Results: {custom_range['start']} to {custom_range['end']} ({custom_range['days']} days)")
+        
+        # Summary metrics for custom range
+        custom_monthly = st.session_state.custom_monthly_costs
+        custom_services = st.session_state.custom_service_costs
+        
+        total_custom_cost = sum([float(item['Amount'].replace('$', '').replace(',', '')) for item in custom_monthly])
+        avg_monthly_custom = total_custom_cost / len(custom_monthly) if custom_monthly else 0
+        
+        col_custom1, col_custom2, col_custom3, col_custom4 = st.columns(4)
+        
+        with col_custom1:
+            st.metric("Total Cost", f"${total_custom_cost:,.2f}")
+        with col_custom2:
+            st.metric("Average Monthly", f"${avg_monthly_custom:,.2f}")
+        with col_custom3:
+            st.metric("Number of Months", len(custom_monthly))
+        with col_custom4:
+            st.metric("Number of Services", len(custom_services))
+        
+        # Custom range charts in tabs
+        custom_tabs = st.tabs(["📈 Monthly Trend", "🥧 Service Breakdown", "📊 Daily Analysis", "📋 Data Tables"])
+        
+        with custom_tabs[0]:
+            # Monthly trend chart for custom range
+            if custom_monthly:
+                df_custom_monthly = pd.DataFrame(custom_monthly)
+                df_custom_monthly['Amount_Numeric'] = df_custom_monthly['Amount'].str.replace('$', '').str.replace(',', '').astype(float)
+                
+                fig_custom_monthly = px.line(
+                    df_custom_monthly,
+                    x='Month',
+                    y='Amount_Numeric',
+                    title=f"Monthly Cost Trend ({custom_range['start']} to {custom_range['end']})",
+                    markers=True
+                )
+                fig_custom_monthly.update_traces(
+                    hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
+                )
+                st.plotly_chart(fig_custom_monthly, use_container_width=True)
+        
+        with custom_tabs[1]:
+            # Service breakdown for custom range
+            if custom_services:
+                df_custom_services = pd.DataFrame(custom_services)
+                df_custom_services['Amount_Numeric'] = df_custom_services['Amount'].str.replace('$', '').str.replace(',', '').astype(float)
+                
+                # Filter services with cost > $1
+                df_custom_services_filtered = df_custom_services[df_custom_services['Amount_Numeric'] >= 1.0]
+                
+                fig_custom_services = px.pie(
+                    df_custom_services_filtered,
+                    values='Amount_Numeric',
+                    names='Service',
+                    title=f"Service Cost Distribution ({custom_range['start']} to {custom_range['end']})"
+                )
+                fig_custom_services.update_traces(
+                    hovertemplate='<b>%{label}</b><br>Cost: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>'
+                )
+                st.plotly_chart(fig_custom_services, use_container_width=True)
+                
+                # Top services table
+                st.write("**Top Services by Cost:**")
+                top_custom_services = df_custom_services.head(10).drop('Amount_Numeric', axis=1)
+                st.dataframe(top_custom_services, use_container_width=True, hide_index=True)
+        
+        with custom_tabs[2]:
+            # Daily analysis (only if range <= 31 days)
+            if st.session_state.custom_daily_costs and custom_range['days'] <= 31:
+                df_custom_daily = pd.DataFrame(st.session_state.custom_daily_costs)
+                df_custom_daily['Amount_Numeric'] = df_custom_daily['Amount'].str.replace('$', '').str.replace(',', '').astype(float)
+                
+                fig_custom_daily = px.line(
+                    df_custom_daily,
+                    x='Date',
+                    y='Amount_Numeric',
+                    title=f"Daily Cost Trend ({custom_range['start']} to {custom_range['end']})",
+                    markers=True
+                )
+                fig_custom_daily.update_traces(
+                    hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
+                )
+                st.plotly_chart(fig_custom_daily, use_container_width=True)
+                
+                # Daily stats
+                daily_costs = df_custom_daily['Amount_Numeric']
+                col_daily1, col_daily2, col_daily3, col_daily4 = st.columns(4)
+                
+                with col_daily1:
+                    st.metric("Avg Daily Cost", f"${daily_costs.mean():,.2f}")
+                with col_daily2:
+                    st.metric("Highest Day", f"${daily_costs.max():,.2f}")
+                with col_daily3:
+                    st.metric("Lowest Day", f"${daily_costs.min():,.2f}")
+                with col_daily4:
+                    st.metric("Daily Variance", f"${daily_costs.std():,.2f}")
+                
+            elif custom_range['days'] > 31:
+                st.info("Daily analysis is only available for date ranges of 31 days or less")
+            else:
+                st.info("No daily cost data available for this range")
+        
+        with custom_tabs[3]:
+            # Data tables for custom range
+            col_table1, col_table2 = st.columns(2)
+            
+            with col_table1:
+                st.write("**Monthly Costs:**")
+                df_monthly_display = pd.DataFrame(custom_monthly)
+                st.dataframe(df_monthly_display, use_container_width=True, hide_index=True)
+            
+            with col_table2:
+                st.write("**Service Costs:**")
+                df_services_display = pd.DataFrame(custom_services).head(15)  # Top 15 services
+                st.dataframe(df_services_display, use_container_width=True, hide_index=True)
+        
+        # Export options for custom range
+        st.markdown("---")
+        st.subheader("📥 Export Custom Range Data")
+        
+        col_export_custom1, col_export_custom2 = st.columns(2)
+        
+        with col_export_custom1:
+            if st.button("📊 Export Custom Monthly Data", key="export_custom_monthly"):
+                csv_data = export_to_csv(custom_monthly, f"custom_monthly_costs_{custom_range['start']}_to_{custom_range['end']}")
+                st.download_button(
+                    label="Download Custom Monthly CSV",
+                    data=csv_data,
+                    file_name=f"custom_monthly_costs_{custom_range['start']}_to_{custom_range['end']}.csv",
+                    mime="text/csv"
+                )
+        
+        with col_export_custom2:
+            if st.button("🛠️ Export Custom Service Data", key="export_custom_services"):
+                csv_data = export_to_csv(custom_services, f"custom_service_costs_{custom_range['start']}_to_{custom_range['end']}")
+                st.download_button(
+                    label="Download Custom Service CSV",
+                    data=csv_data,
+                    file_name=f"custom_service_costs_{custom_range['start']}_to_{custom_range['end']}.csv",
+                    mime="text/csv"
+                )
+        
+        # Clear custom analysis
+        if st.button("🗑️ Clear Custom Analysis"):
+            for key in ['custom_monthly_costs', 'custom_service_costs', 'custom_daily_costs', 'custom_date_range']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
 
 # Export functionality  
 st.header("📥 Export Options")

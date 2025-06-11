@@ -31,7 +31,12 @@ class AWSCostService:
             
             self.cost_explorer = session.client('ce', region_name='us-east-1')  # Cost Explorer is only available in us-east-1
             self.bedrock = session.client('bedrock-runtime', region_name=aws_region)
-            logger.info("AWS Cost Explorer and Bedrock clients initialized successfully")
+            self.ec2 = session.client('ec2', region_name=aws_region)
+            self.rds = session.client('rds', region_name=aws_region)
+            self.s3 = session.client('s3', region_name=aws_region)
+            self.lambda_client = session.client('lambda', region_name=aws_region)
+            self.resource_groups = session.client('resourcegroupstaggingapi', region_name=aws_region)
+            logger.info("AWS Cost Explorer, Bedrock, and resource clients initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize AWS Cost Explorer client: {str(e)}")
@@ -612,3 +617,280 @@ class AWSCostService:
         except Exception as e:
             logger.error(f"Error fetching usage type details: {str(e)}")
             raise Exception(f"Failed to fetch usage type details: {str(e)}")
+    
+    def get_resource_details(self, resource_id: str, service_name: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific AWS resource including name and tags
+        
+        Args:
+            resource_id: AWS resource ID
+            service_name: AWS service name
+            
+        Returns:
+            Dictionary containing resource details
+        """
+        try:
+            resource_info = {
+                'resource_id': resource_id,
+                'name': 'Unknown',
+                'tags': {},
+                'service': service_name,
+                'type': 'Unknown',
+                'region': 'Unknown',
+                'state': 'Unknown'
+            }
+            
+            # Skip if no resource ID or generic IDs
+            if not resource_id or resource_id in ['NoResourceId', 'Unknown Resource']:
+                return resource_info
+            
+            # EC2 Instances
+            if 'i-' in resource_id and any(s in service_name for s in ['EC2', 'Elastic Compute']):
+                try:
+                    response = self.ec2.describe_instances(InstanceIds=[resource_id])
+                    if response['Reservations']:
+                        instance = response['Reservations'][0]['Instances'][0]
+                        resource_info.update({
+                            'name': next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), resource_id),
+                            'type': instance.get('InstanceType', 'Unknown'),
+                            'state': instance.get('State', {}).get('Name', 'Unknown'),
+                            'region': instance.get('Placement', {}).get('AvailabilityZone', 'Unknown'),
+                            'tags': {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                        })
+                except Exception as e:
+                    logger.warning(f"Could not fetch EC2 details for {resource_id}: {str(e)}")
+            
+            # RDS Instances
+            elif any(s in service_name for s in ['RDS', 'Relational Database']):
+                try:
+                    response = self.rds.describe_db_instances(DBInstanceIdentifier=resource_id)
+                    if response['DBInstances']:
+                        db = response['DBInstances'][0]
+                        resource_info.update({
+                            'name': db.get('DBName', resource_id),
+                            'type': db.get('DBInstanceClass', 'Unknown'),
+                            'state': db.get('DBInstanceStatus', 'Unknown'),
+                            'region': db.get('AvailabilityZone', 'Unknown')
+                        })
+                        
+                        # Get tags
+                        try:
+                            tags_response = self.rds.list_tags_for_resource(ResourceName=db['DBInstanceArn'])
+                            resource_info['tags'] = {tag['Key']: tag['Value'] for tag in tags_response.get('TagList', [])}
+                        except:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Could not fetch RDS details for {resource_id}: {str(e)}")
+            
+            # S3 Buckets
+            elif any(s in service_name for s in ['S3', 'Simple Storage']):
+                try:
+                    # For S3, resource_id might be bucket name
+                    bucket_name = resource_id.split('/')[-1] if '/' in resource_id else resource_id
+                    
+                    # Check if bucket exists and get info
+                    self.s3.head_bucket(Bucket=bucket_name)
+                    resource_info.update({
+                        'name': bucket_name,
+                        'type': 'S3 Bucket',
+                        'state': 'Active'
+                    })
+                    
+                    # Get bucket tags
+                    try:
+                        tags_response = self.s3.get_bucket_tagging(Bucket=bucket_name)
+                        resource_info['tags'] = {tag['Key']: tag['Value'] for tag in tags_response.get('TagSet', [])}
+                    except:
+                        pass
+                        
+                except Exception as e:
+                    logger.warning(f"Could not fetch S3 details for {resource_id}: {str(e)}")
+            
+            # Lambda Functions
+            elif any(s in service_name for s in ['Lambda', 'AWS Lambda']):
+                try:
+                    response = self.lambda_client.get_function(FunctionName=resource_id)
+                    function_config = response['Configuration']
+                    resource_info.update({
+                        'name': function_config.get('FunctionName', resource_id),
+                        'type': f"Lambda ({function_config.get('Runtime', 'Unknown')})",
+                        'state': function_config.get('State', 'Unknown'),
+                        'region': function_config.get('Environment', {}).get('Variables', {}).get('AWS_REGION', 'Unknown')
+                    })
+                    
+                    # Get tags
+                    try:
+                        tags_response = self.lambda_client.list_tags(Resource=function_config['FunctionArn'])
+                        resource_info['tags'] = tags_response.get('Tags', {})
+                    except:
+                        pass
+                        
+                except Exception as e:
+                    logger.warning(f"Could not fetch Lambda details for {resource_id}: {str(e)}")
+            
+            # Try generic resource groups tagging API as fallback
+            else:
+                try:
+                    response = self.resource_groups.get_resources(
+                        ResourcesPerPage=1,
+                        ResourceTypeFilters=[service_name] if service_name else []
+                    )
+                    
+                    for resource in response.get('ResourceTagMappingList', []):
+                        if resource_id in resource.get('ResourceARN', ''):
+                            resource_info.update({
+                                'name': resource.get('ResourceARN', '').split('/')[-1],
+                                'tags': {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
+                            })
+                            break
+                            
+                except Exception as e:
+                    logger.warning(f"Could not fetch generic resource details for {resource_id}: {str(e)}")
+            
+            logger.info(f"Retrieved resource details for {resource_id}")
+            return resource_info
+            
+        except Exception as e:
+            logger.error(f"Error fetching resource details for {resource_id}: {str(e)}")
+            return resource_info
+    
+    def get_enhanced_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        """
+        Get enhanced detailed breakdown with resource identification for a specific usage type
+        
+        Args:
+            service_name: Name of the AWS service
+            usage_type: Specific usage type to analyze
+            month: Month to analyze (format: "YYYY-MM")
+            start_date: Start date for cost data
+            end_date: End date for cost data
+            
+        Returns:
+            Dictionary containing enhanced usage type breakdown with resource details
+        """
+        try:
+            logger.info(f"Fetching enhanced breakdown for {service_name} - {usage_type} in {month}")
+            
+            # Get the basic usage type details first
+            basic_details = self.get_usage_type_details(service_name, usage_type, month, start_date, end_date)
+            
+            # Parse month to get specific date range
+            month_start = datetime.strptime(month, '%Y-%m')
+            if month_start.month == 12:
+                month_end = month_start.replace(year=month_start.year + 1, month=1, day=1)
+            else:
+                month_end = month_start.replace(month=month_start.month + 1, day=1)
+            
+            # Get resource-level breakdown with more details
+            try:
+                resource_response = self.cost_explorer.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': month_start.strftime('%Y-%m-%d'),
+                        'End': month_end.strftime('%Y-%m-%d')
+                    },
+                    Granularity='MONTHLY',
+                    Metrics=['BlendedCost', 'UsageQuantity'],
+                    GroupBy=[
+                        {
+                            'Type': 'DIMENSION',
+                            'Key': 'RESOURCE_ID'
+                        }
+                    ],
+                    Filter={
+                        'And': [
+                            {
+                                'Dimensions': {
+                                    'Key': 'SERVICE',
+                                    'Values': [service_name]
+                                }
+                            },
+                            {
+                                'Dimensions': {
+                                    'Key': 'USAGE_TYPE',
+                                    'Values': [usage_type]
+                                }
+                            }
+                        ]
+                    }
+                )
+                
+                enhanced_resources = []
+                for result in resource_response['ResultsByTime']:
+                    for group in result['Groups']:
+                        resource_id = group['Keys'][0] if group['Keys'] else 'Unknown Resource'
+                        cost = float(group['Metrics']['BlendedCost']['Amount'])
+                        usage = float(group['Metrics']['UsageQuantity']['Amount'])
+                        
+                        if cost > 0 and resource_id != 'NoResourceId':
+                            # Get detailed resource information
+                            resource_details = self.get_resource_details(resource_id, service_name)
+                            
+                            enhanced_resources.append({
+                                'Resource_ID': resource_id,
+                                'Resource_Name': resource_details['name'],
+                                'Resource_Type': resource_details['type'],
+                                'Resource_State': resource_details['state'],
+                                'Region': resource_details['region'],
+                                'Cost': f"${cost:,.2f}",
+                                'Usage_Quantity': f"{usage:,.2f}",
+                                'Cost_Numeric': cost,
+                                'Usage_Numeric': usage,
+                                'Tags': resource_details['tags'],
+                                'Owner': resource_details['tags'].get('Owner', 'Unknown'),
+                                'Environment': resource_details['tags'].get('Environment', 'Unknown'),
+                                'Project': resource_details['tags'].get('Project', 'Unknown')
+                            })
+                
+                # Sort by cost (descending)
+                enhanced_resources.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+                
+                # Update the basic details with enhanced resource information
+                basic_details['enhanced_resources'] = enhanced_resources[:50]  # Top 50 resources
+                
+            except Exception as e:
+                logger.warning(f"Could not fetch enhanced resource data: {str(e)}")
+                basic_details['enhanced_resources'] = []
+            
+            # Add cost attribution analysis
+            if basic_details['enhanced_resources']:
+                total_identified_cost = sum([r['Cost_Numeric'] for r in basic_details['enhanced_resources']])
+                basic_details['cost_attribution'] = {
+                    'total_cost': basic_details['total_cost'],
+                    'identified_cost': total_identified_cost,
+                    'unidentified_cost': basic_details['total_cost'] - total_identified_cost,
+                    'attribution_percentage': (total_identified_cost / basic_details['total_cost']) * 100 if basic_details['total_cost'] > 0 else 0
+                }
+                
+                # Group by common attributes
+                by_owner = {}
+                by_environment = {}
+                by_project = {}
+                
+                for resource in basic_details['enhanced_resources']:
+                    owner = resource['Owner']
+                    env = resource['Environment']
+                    project = resource['Project']
+                    cost = resource['Cost_Numeric']
+                    
+                    by_owner[owner] = by_owner.get(owner, 0) + cost
+                    by_environment[env] = by_environment.get(env, 0) + cost
+                    by_project[project] = by_project.get(project, 0) + cost
+                
+                basic_details['cost_by_owner'] = sorted(
+                    [{'Owner': k, 'Cost': v, 'Cost_Formatted': f"${v:,.2f}"} for k, v in by_owner.items()],
+                    key=lambda x: x['Cost'], reverse=True
+                )
+                basic_details['cost_by_environment'] = sorted(
+                    [{'Environment': k, 'Cost': v, 'Cost_Formatted': f"${v:,.2f}"} for k, v in by_environment.items()],
+                    key=lambda x: x['Cost'], reverse=True
+                )
+                basic_details['cost_by_project'] = sorted(
+                    [{'Project': k, 'Cost': v, 'Cost_Formatted': f"${v:,.2f}"} for k, v in by_project.items()],
+                    key=lambda x: x['Cost'], reverse=True
+                )
+            
+            return basic_details
+            
+        except Exception as e:
+            logger.error(f"Error fetching enhanced usage type details: {str(e)}")
+            raise Exception(f"Failed to fetch enhanced usage type details: {str(e)}")

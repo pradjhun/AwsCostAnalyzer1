@@ -391,6 +391,36 @@ with tab5:
                                     
                                 except Exception as e:
                                     st.error(f"❌ Error getting details: {str(e)}")
+                        
+                        # Enhanced drill-down button for resource identification
+                        if st.button("🏷️ Get Resource Names", key="enhanced_drill_down_btn"):
+                            with st.spinner(f"Fetching resource names and details for {selected_usage_type} in {selected_month}..."):
+                                try:
+                                    cost_service = AWSCostService()
+                                    start_date, end_date = get_date_range(6)
+                                    
+                                    # Convert month format for API call
+                                    month_parts = selected_month.split(' ')
+                                    month_num = {
+                                        'January': '01', 'February': '02', 'March': '03', 
+                                        'April': '04', 'May': '05', 'June': '06',
+                                        'July': '07', 'August': '08', 'September': '09', 
+                                        'October': '10', 'November': '11', 'December': '12'
+                                    }[month_parts[0]]
+                                    year = month_parts[1]
+                                    month_format = f"{year}-{month_num}"
+                                    
+                                    # Get enhanced usage type breakdown with resource details
+                                    enhanced_details = cost_service.get_enhanced_usage_type_details(
+                                        selected_service, selected_usage_type, month_format, start_date, end_date
+                                    )
+                                    
+                                    st.session_state.enhanced_usage_details = enhanced_details
+                                    st.success("✅ Resource identification completed!")
+                                    st.rerun()
+                                    
+                                except Exception as e:
+                                    st.error(f"❌ Error fetching resource details: {str(e)}")
                     
                     # Display main usage breakdown table
                     st.write("**Usage Type Summary:**")
@@ -545,6 +575,135 @@ with tab5:
                     if st.button("🗑️ Clear Detailed Analysis"):
                         if 'usage_type_details' in st.session_state:
                             del st.session_state.usage_type_details
+                        st.rerun()
+                
+                # Display enhanced resource identification if available
+                if 'enhanced_usage_details' in st.session_state and st.session_state.enhanced_usage_details:
+                    enhanced_data = st.session_state.enhanced_usage_details
+                    
+                    st.markdown("---")
+                    st.subheader(f"🏷️ Resource Identification: {enhanced_data['usage_type']} ({enhanced_data['month']})")
+                    
+                    # Cost attribution summary
+                    if 'cost_attribution' in enhanced_data:
+                        attribution = enhanced_data['cost_attribution']
+                        col_attr1, col_attr2, col_attr3 = st.columns(3)
+                        
+                        with col_attr1:
+                            st.metric("Total Cost", f"${attribution['total_cost']:,.2f}")
+                        with col_attr2:
+                            st.metric("Identified Resources", f"${attribution['identified_cost']:,.2f}")
+                        with col_attr3:
+                            st.metric("Attribution %", f"{attribution['attribution_percentage']:.1f}%")
+                    
+                    # Enhanced resource breakdown with names and details
+                    if enhanced_data.get('enhanced_resources'):
+                        st.write("**Resource Details with Names & Tags:**")
+                        
+                        # Create enhanced resource dataframe
+                        df_enhanced = pd.DataFrame(enhanced_data['enhanced_resources'])
+                        
+                        # Display columns with resource identification
+                        display_columns = ['Resource_Name', 'Resource_ID', 'Resource_Type', 'Resource_State', 
+                                         'Region', 'Cost', 'Owner', 'Environment', 'Project']
+                        
+                        # Filter columns that exist in the dataframe
+                        available_columns = [col for col in display_columns if col in df_enhanced.columns]
+                        display_enhanced = df_enhanced[available_columns]
+                        
+                        st.dataframe(display_enhanced, use_container_width=True, hide_index=True)
+                        
+                        # Resource cost visualization by name
+                        if len(df_enhanced) > 1:
+                            fig_resource_names = px.bar(
+                                df_enhanced.head(15),
+                                x='Cost_Numeric',
+                                y='Resource_Name',
+                                orientation='h',
+                                title=f"Top Resources by Cost - {enhanced_data['usage_type']}",
+                                labels={'Cost_Numeric': 'Cost (USD)', 'Resource_Name': 'Resource Name'},
+                                hover_data=['Resource_Type', 'Owner', 'Environment']
+                            )
+                            fig_resource_names.update_traces(
+                                hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<br>Type: %{customdata[0]}<br>Owner: %{customdata[1]}<br>Environment: %{customdata[2]}<extra></extra>'
+                            )
+                            st.plotly_chart(fig_resource_names, use_container_width=True)
+                    
+                    # Cost breakdown by owner, environment, and project
+                    tabs_breakdown = st.tabs(["👤 By Owner", "🌍 By Environment", "📁 By Project"])
+                    
+                    with tabs_breakdown[0]:
+                        if enhanced_data.get('cost_by_owner'):
+                            st.write("**Cost Attribution by Owner:**")
+                            df_owners = pd.DataFrame(enhanced_data['cost_by_owner'])
+                            st.dataframe(df_owners, use_container_width=True, hide_index=True)
+                            
+                            if len(df_owners) > 1:
+                                fig_owners = px.pie(
+                                    df_owners,
+                                    values='Cost',
+                                    names='Owner',
+                                    title="Cost Distribution by Owner"
+                                )
+                                st.plotly_chart(fig_owners, use_container_width=True)
+                    
+                    with tabs_breakdown[1]:
+                        if enhanced_data.get('cost_by_environment'):
+                            st.write("**Cost Attribution by Environment:**")
+                            df_env = pd.DataFrame(enhanced_data['cost_by_environment'])
+                            st.dataframe(df_env, use_container_width=True, hide_index=True)
+                            
+                            if len(df_env) > 1:
+                                fig_env = px.pie(
+                                    df_env,
+                                    values='Cost',
+                                    names='Environment',
+                                    title="Cost Distribution by Environment"
+                                )
+                                st.plotly_chart(fig_env, use_container_width=True)
+                    
+                    with tabs_breakdown[2]:
+                        if enhanced_data.get('cost_by_project'):
+                            st.write("**Cost Attribution by Project:**")
+                            df_projects = pd.DataFrame(enhanced_data['cost_by_project'])
+                            st.dataframe(df_projects, use_container_width=True, hide_index=True)
+                            
+                            if len(df_projects) > 1:
+                                fig_projects = px.pie(
+                                    df_projects,
+                                    values='Cost',
+                                    names='Project',
+                                    title="Cost Distribution by Project"
+                                )
+                                st.plotly_chart(fig_projects, use_container_width=True)
+                    
+                    # Individual resource details expander
+                    with st.expander("🔍 Individual Resource Tags & Details"):
+                        if enhanced_data.get('enhanced_resources'):
+                            for i, resource in enumerate(enhanced_data['enhanced_resources'][:10]):  # Show top 10
+                                with st.container():
+                                    col_res1, col_res2 = st.columns([2, 1])
+                                    
+                                    with col_res1:
+                                        st.write(f"**{resource['Resource_Name']}** ({resource['Resource_ID']})")
+                                        st.write(f"Type: {resource['Resource_Type']} | State: {resource['Resource_State']} | Region: {resource['Region']}")
+                                        
+                                        if resource.get('Tags'):
+                                            tags_str = ", ".join([f"{k}: {v}" for k, v in resource['Tags'].items()])
+                                            st.write(f"Tags: {tags_str}")
+                                        else:
+                                            st.write("Tags: No tags found")
+                                    
+                                    with col_res2:
+                                        st.metric("Cost", resource['Cost'])
+                                        st.metric("Usage", resource['Usage_Quantity'])
+                                    
+                                    st.markdown("---")
+                    
+                    # Clear enhanced analysis button
+                    if st.button("🗑️ Clear Resource Analysis"):
+                        if 'enhanced_usage_details' in st.session_state:
+                            del st.session_state.enhanced_usage_details
                         st.rerun()
             
             # Display AI recommendations if available

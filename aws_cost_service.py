@@ -718,31 +718,44 @@ class AWSCostService:
             # Amazon Q Business - get indices and applications
             if 'Amazon Q' in service_name:
                 try:
-                    # Initialize Q Business client
-                    qbusiness = boto3.client('qbusiness', region_name=self.cost_explorer.meta.region_name)
+                    # Initialize Q Business client with correct region
+                    regions_to_try = ['us-east-1', 'us-west-2', 'eu-west-1']
+                    qbusiness = None
                     
-                    # List applications
-                    applications = qbusiness.list_applications()
-                    for app in applications.get('applications', []):
-                        app_id = app.get('applicationId')
-                        app_name = app.get('displayName', app_id)
-                        
-                        # Get indices for this application
+                    for region in regions_to_try:
                         try:
-                            indices = qbusiness.list_indices(applicationId=app_id)
-                            for index in indices.get('indices', []):
-                                index_id = index.get('indexId')
-                                index_name = index.get('displayName', index_id)
-                                resources.append({
-                                    'resource_name': f"{app_name} - {index_name}",
-                                    'resource_id': f"{app_id}/{index_id}",
-                                    'resource_type': 'Q Business Index',
-                                    'application': app_name,
-                                    'index_name': index_name,
-                                    'status': index.get('status', 'Unknown')
-                                })
+                            qbusiness = boto3.client('qbusiness', region_name=region)
+                            # Test the connection
+                            applications = qbusiness.list_applications()
+                            break
                         except Exception as e:
-                            logger.debug(f"Could not list indices for app {app_id}: {str(e)}")
+                            logger.debug(f"Q Business not available in {region}: {str(e)}")
+                            continue
+                    
+                    if qbusiness:
+                        # List applications
+                        applications = qbusiness.list_applications()
+                        for app in applications.get('applications', []):
+                            app_id = app.get('applicationId')
+                            app_name = app.get('displayName', app_id)
+                            
+                            # Get indices for this application
+                            try:
+                                indices = qbusiness.list_indices(applicationId=app_id)
+                                for index in indices.get('indices', []):
+                                    index_id = index.get('indexId')
+                                    index_name = index.get('displayName', index_id)
+                                    resources.append({
+                                        'resource_name': index_name,
+                                        'resource_id': index_id,
+                                        'application': app_name,
+                                        'application_id': app_id,
+                                        'status': index.get('status', 'Unknown')
+                                    })
+                            except Exception as e:
+                                logger.debug(f"Could not list indices for app {app_id}: {str(e)}")
+                    else:
+                        logger.warning("Q Business service not available in any tested region")
                             
                 except Exception as e:
                     logger.warning(f"Could not access Q Business resources: {str(e)}")
@@ -754,11 +767,11 @@ class AWSCostService:
                     for reservation in response['Reservations']:
                         for instance in reservation['Instances']:
                             instance_id = instance['InstanceId']
-                            name_tag = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), instance_id)
+                            name_tag = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), f"EC2-{instance_id}")
                             resources.append({
                                 'resource_name': name_tag,
                                 'resource_id': instance_id,
-                                'resource_type': instance.get('InstanceType', 'Unknown'),
+                                'instance_type': instance.get('InstanceType', 'Unknown'),
                                 'state': instance.get('State', {}).get('Name', 'Unknown'),
                                 'az': instance.get('Placement', {}).get('AvailabilityZone', 'Unknown')
                             })
@@ -771,10 +784,11 @@ class AWSCostService:
                     response = self.rds.describe_db_instances()
                     for db in response['DBInstances']:
                         db_id = db['DBInstanceIdentifier']
+                        db_name = db.get('DBName') or db_id
                         resources.append({
-                            'resource_name': db.get('DBName', db_id),
+                            'resource_name': db_name,
                             'resource_id': db_id,
-                            'resource_type': db.get('DBInstanceClass', 'Unknown'),
+                            'instance_class': db.get('DBInstanceClass', 'Unknown'),
                             'state': db.get('DBInstanceStatus', 'Unknown'),
                             'engine': db.get('Engine', 'Unknown')
                         })
@@ -790,7 +804,6 @@ class AWSCostService:
                         resources.append({
                             'resource_name': bucket_name,
                             'resource_id': bucket_name,
-                            'resource_type': 'S3 Bucket',
                             'creation_date': bucket.get('CreationDate', 'Unknown')
                         })
                 except Exception as e:
@@ -805,7 +818,7 @@ class AWSCostService:
                         resources.append({
                             'resource_name': function_name,
                             'resource_id': function_name,
-                            'resource_type': f"Lambda ({function.get('Runtime', 'Unknown')})",
+                            'runtime': function.get('Runtime', 'Unknown'),
                             'state': function.get('State', 'Unknown')
                         })
                 except Exception as e:

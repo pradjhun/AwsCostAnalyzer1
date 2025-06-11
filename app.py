@@ -714,6 +714,42 @@ with tab5:
                     st.markdown("---")
                     st.subheader(f"🏷️ Resource Identification: {enhanced_data['usage_type']} ({enhanced_data['month']})")
                     
+                    # Show actual resource names first (highest priority)
+                    if enhanced_data.get('actual_resources'):
+                        st.write("**🎯 Actual Resource Names and IDs:**")
+                        actual_resources = enhanced_data['actual_resources']
+                        
+                        if actual_resources:
+                            df_actual = pd.DataFrame(actual_resources)
+                            
+                            # For Amazon Q, show application and index details
+                            if 'Amazon Q' in enhanced_data.get('service_name', ''):
+                                st.success(f"Found {len(df_actual)} Amazon Q Business resources:")
+                                for idx, resource in df_actual.iterrows():
+                                    app_name = resource.get('application', 'Unknown Application')
+                                    index_name = resource.get('resource_name', 'Unknown Index')
+                                    index_id = resource.get('resource_id', 'Unknown ID')
+                                    status = resource.get('status', 'Unknown')
+                                    st.write(f"• **{index_name}** (ID: {index_id}) - App: {app_name} - Status: {status}")
+                                
+                                # Show table with Resource Name and ID prioritized
+                                display_cols = ['resource_name', 'resource_id', 'application', 'status']
+                                available_cols = [col for col in display_cols if col in df_actual.columns]
+                                df_display = df_actual[available_cols]
+                                st.dataframe(df_display, use_container_width=True, hide_index=True)
+                            else:
+                                # For other services, prioritize Resource Name and ID
+                                priority_cols = ['resource_name', 'resource_id', 'instance_type', 'state', 'az', 'engine', 'runtime']
+                                available_cols = [col for col in priority_cols if col in df_actual.columns]
+                                df_display = df_actual[available_cols] if available_cols else df_actual
+                                st.dataframe(df_display, use_container_width=True, hide_index=True)
+                                
+                                st.info(f"Found {len(actual_resources)} actual resources for {enhanced_data['service_name']}")
+                        else:
+                            st.warning("No actual resources found. This may be due to insufficient permissions or resources in different regions.")
+                        
+                        st.markdown("---")
+                    
                     # Cost attribution summary
                     if 'cost_attribution' in enhanced_data:
                         attribution = enhanced_data['cost_attribution']
@@ -728,14 +764,13 @@ with tab5:
                     
                     # Enhanced resource breakdown with names and details
                     if enhanced_data.get('enhanced_resources'):
-                        st.write("**Resource Details with Names & Tags:**")
+                        st.write("**💰 Cost Attribution by Resource Attributes:**")
                         
                         # Create enhanced resource dataframe
                         df_enhanced = pd.DataFrame(enhanced_data['enhanced_resources'])
                         
-                        # Display columns with resource identification
-                        display_columns = ['Resource_Name', 'Resource_ID', 'Resource_Type', 'Resource_State', 
-                                         'Region', 'Cost', 'Owner', 'Environment', 'Project']
+                        # Display columns prioritizing Resource Name and ID over Type
+                        display_columns = ['Resource_Name', 'Resource_ID', 'Cost', 'Category', 'Region']
                         
                         # Filter columns that exist in the dataframe
                         available_columns = [col for col in display_columns if col in df_enhanced.columns]
@@ -815,8 +850,8 @@ with tab5:
                                     col_res1, col_res2 = st.columns([2, 1])
                                     
                                     with col_res1:
-                                        st.write(f"**{resource['Resource_Name']}** ({resource['Resource_ID']})")
-                                        st.write(f"Type: {resource['Resource_Type']} | State: {resource['Resource_State']} | Region: {resource['Region']}")
+                                        st.write(f"**{resource['Resource_Name']}**")
+                                        st.write(f"ID: {resource['Resource_ID']} | State: {resource.get('Resource_State', 'Unknown')} | Region: {resource.get('Region', 'Unknown')}")
                                         
                                         if resource.get('Tags'):
                                             tags_str = ", ".join([f"{k}: {v}" for k, v in resource['Tags'].items()])

@@ -27,6 +27,80 @@ if 'service_costs' not in st.session_state:
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = None
 
+# Date Range Configuration (Top of page)
+st.header("📅 Date Range Configuration")
+
+col_date1, col_date2, col_date3 = st.columns([2, 2, 1])
+
+with col_date1:
+    start_date_input = st.date_input(
+        "Start Date",
+        value=datetime.now() - timedelta(days=180),  # Default to 6 months ago
+        max_value=datetime.now().date(),
+        help="Select the start date for cost analysis"
+    )
+
+with col_date2:
+    end_date_input = st.date_input(
+        "End Date",
+        value=datetime.now().date(),
+        max_value=datetime.now().date(),
+        help="Select the end date for cost analysis"
+    )
+
+with col_date3:
+    st.write("")  # Spacing
+    st.write("")  # Spacing
+    if st.button("🔍 Analyze Date Range", type="primary"):
+        # Validate date range
+        if start_date_input >= end_date_input:
+            st.error("Start date must be before end date")
+        elif (end_date_input - start_date_input).days > 365:
+            st.error("Date range cannot exceed 365 days")
+        elif start_date_input > datetime.now().date():
+            st.error("Start date cannot be in the future")
+        else:
+            with st.spinner("Fetching cost data for selected date range..."):
+                try:
+                    cost_service = AWSCostService()
+                    
+                    # Convert dates to datetime objects
+                    selected_start = datetime.combine(start_date_input, datetime.min.time())
+                    selected_end = datetime.combine(end_date_input, datetime.min.time())
+                    
+                    # Get monthly costs for selected range
+                    st.session_state.cost_data = cost_service.get_monthly_costs(selected_start, selected_end)
+                    
+                    # Get service breakdown for selected range
+                    st.session_state.service_costs = cost_service.get_costs_by_service(selected_start, selected_end)
+                    
+                    # Get daily costs if range is <= 31 days
+                    if (end_date_input - start_date_input).days <= 31:
+                        st.session_state.daily_costs = cost_service.get_daily_costs(selected_start, selected_end)
+                    else:
+                        st.session_state.daily_costs = []
+                    
+                    # Store date range info
+                    st.session_state.current_date_range = {
+                        'start': start_date_input,
+                        'end': end_date_input,
+                        'days': (end_date_input - start_date_input).days
+                    }
+                    st.session_state.last_refresh = datetime.now()
+                    
+                    st.success(f"✅ Analysis completed for {start_date_input} to {end_date_input}")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error fetching cost data: {str(e)}")
+
+# Display current date range
+if 'current_date_range' in st.session_state:
+    current_range = st.session_state.current_date_range
+    st.info(f"📊 Currently analyzing: {current_range['start']} to {current_range['end']} ({current_range['days']} days)")
+
+st.markdown("---")
+
 # Sidebar for configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -45,34 +119,71 @@ with st.sidebar:
     
     st.text(f"Region: {aws_region}")
     
-    # Refresh data button
-    st.subheader("Data Management")
-    if st.button("🔄 Refresh Cost Data", type="primary"):
-        with st.spinner("Fetching AWS cost data..."):
-            try:
-                cost_service = AWSCostService()
-                start_date, end_date = get_date_range(6)
-                
-                # Get monthly costs
-                st.session_state.cost_data = cost_service.get_monthly_costs(start_date, end_date)
-                
-                # Get service breakdown
-                st.session_state.service_costs = cost_service.get_costs_by_service(start_date, end_date)
-                
-                st.session_state.last_refresh = datetime.now()
-                st.success("✅ Data refreshed successfully!")
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"❌ Error fetching cost data: {str(e)}")
+    # Quick preset buttons
+    st.subheader("Quick Date Presets")
+    
+    col_preset1, col_preset2 = st.columns(2)
+    
+    with col_preset1:
+        if st.button("Last 30 days"):
+            st.session_state.preset_start = datetime.now() - timedelta(days=30)
+            st.session_state.preset_end = datetime.now()
+            st.rerun()
+        
+        if st.button("Last 90 days"):
+            st.session_state.preset_start = datetime.now() - timedelta(days=90)
+            st.session_state.preset_end = datetime.now()
+            st.rerun()
+    
+    with col_preset2:
+        if st.button("Last 6 months"):
+            st.session_state.preset_start = datetime.now() - timedelta(days=180)
+            st.session_state.preset_end = datetime.now()
+            st.rerun()
+        
+        if st.button("Last 12 months"):
+            st.session_state.preset_start = datetime.now() - timedelta(days=365)
+            st.session_state.preset_end = datetime.now()
+            st.rerun()
     
     # Last refresh timestamp
     if st.session_state.last_refresh:
         st.text(f"Last refresh: {st.session_state.last_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Apply preset if selected
+    if 'preset_start' in st.session_state and 'preset_end' in st.session_state:
+        with st.spinner("Applying preset date range..."):
+            try:
+                cost_service = AWSCostService()
+                
+                # Get costs for preset range
+                st.session_state.cost_data = cost_service.get_monthly_costs(
+                    st.session_state.preset_start, st.session_state.preset_end
+                )
+                st.session_state.service_costs = cost_service.get_costs_by_service(
+                    st.session_state.preset_start, st.session_state.preset_end
+                )
+                
+                # Update current range
+                st.session_state.current_date_range = {
+                    'start': st.session_state.preset_start.date(),
+                    'end': st.session_state.preset_end.date(),
+                    'days': (st.session_state.preset_end - st.session_state.preset_start).days
+                }
+                st.session_state.last_refresh = datetime.now()
+                
+                # Clean up preset variables
+                del st.session_state.preset_start
+                del st.session_state.preset_end
+                
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"❌ Error applying preset: {str(e)}")
 
 # Main content area
 if st.session_state.cost_data is None:
-    st.info("👆 Click 'Refresh Cost Data' in the sidebar to load AWS cost information")
+    st.info("👆 Select a date range above and click 'Analyze Date Range' to load AWS cost information")
     st.stop()
 
 # Display cost data
@@ -88,7 +199,11 @@ with col1:
         df_monthly['Amount'] = df_monthly['Amount'].apply(format_currency)
         
         # Display table with sorting
-        st.subheader("💵 Last 6 Months Cost Summary")
+        current_range = st.session_state.get('current_date_range', {})
+        if current_range:
+            st.subheader(f"💵 Cost Summary ({current_range['start']} to {current_range['end']})")
+        else:
+            st.subheader("💵 Cost Summary")
         st.dataframe(
             df_monthly,
             use_container_width=True,
@@ -98,12 +213,17 @@ with col1:
         # Total cost calculation
         total_cost = sum([float(item['Amount'].replace('$', '').replace(',', '')) 
                          for item in st.session_state.cost_data])
-        average_monthly = total_cost / len(st.session_state.cost_data)
+        num_months = len(st.session_state.cost_data)
+        average_monthly = total_cost / num_months if num_months > 0 else 0
+        
+        # Get current date range for display
+        current_range = st.session_state.get('current_date_range', {'days': 180})
+        range_description = f"{current_range['days']} days" if current_range else "Selected period"
         
         # Metrics
         col_metric1, col_metric2, col_metric3 = st.columns(3)
         with col_metric1:
-            st.metric("Total Cost (6 months)", format_currency(total_cost))
+            st.metric(f"Total Cost ({range_description})", format_currency(total_cost))
         with col_metric2:
             st.metric("Average Monthly Cost", format_currency(average_monthly))
         with col_metric3:
@@ -137,7 +257,7 @@ with col2:
 st.header("📊 Interactive Charts")
 
 # Create tabs for different chart types
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights", "🔍 Individual Service Analysis", "📅 Custom Date Range"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights", "🔍 Individual Service Analysis"])
 
 with tab1:
     st.subheader("Monthly Cost Trend")
@@ -151,7 +271,7 @@ with tab1:
             df_chart, 
             x='Month', 
             y='Amount_Numeric',
-            title="AWS Costs Over Last 6 Months",
+            title=f"AWS Costs Trend ({st.session_state.current_date_range.get('start', 'Selected')} to {st.session_state.current_date_range.get('end', 'Period')})" if 'current_date_range' in st.session_state else "AWS Costs Trend",
             markers=True,
             line_shape='linear'
         )
@@ -180,7 +300,7 @@ with tab2:
             df_services_filtered, 
             values='Amount_Numeric', 
             names='Service',
-            title="Cost Distribution by AWS Service (Last 6 Months)"
+            title=f"Cost Distribution by AWS Service ({st.session_state.current_date_range.get('start', 'Selected')} to {st.session_state.current_date_range.get('end', 'Period')})" if 'current_date_range' in st.session_state else "Cost Distribution by AWS Service"
         )
         fig_pie.update_traces(
             hovertemplate='<b>%{label}</b><br>Cost: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>'

@@ -762,37 +762,7 @@ with tab5:
                         with col_attr3:
                             st.metric("Attribution %", f"{attribution['attribution_percentage']:.1f}%")
                     
-                    # Enhanced resource breakdown with names and details
-                    if enhanced_data.get('enhanced_resources'):
-                        st.write("**💰 Cost Attribution by Resource Attributes:**")
-                        
-                        # Create enhanced resource dataframe
-                        df_enhanced = pd.DataFrame(enhanced_data['enhanced_resources'])
-                        
-                        # Display columns prioritizing Resource Name and ID over Type
-                        display_columns = ['Resource_Name', 'Resource_ID', 'Cost', 'Category', 'Region']
-                        
-                        # Filter columns that exist in the dataframe
-                        available_columns = [col for col in display_columns if col in df_enhanced.columns]
-                        display_enhanced = df_enhanced[available_columns]
-                        
-                        st.dataframe(display_enhanced, use_container_width=True, hide_index=True)
-                        
-                        # Resource cost visualization by name
-                        if len(df_enhanced) > 1:
-                            fig_resource_names = px.bar(
-                                df_enhanced.head(15),
-                                x='Cost_Numeric',
-                                y='Resource_Name',
-                                orientation='h',
-                                title=f"Top Resources by Cost - {enhanced_data['usage_type']}",
-                                labels={'Cost_Numeric': 'Cost (USD)', 'Resource_Name': 'Resource Name'},
-                                hover_data=['Resource_Type', 'Owner', 'Environment']
-                            )
-                            fig_resource_names.update_traces(
-                                hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<br>Type: %{customdata[0]}<br>Owner: %{customdata[1]}<br>Environment: %{customdata[2]}<extra></extra>'
-                            )
-                            st.plotly_chart(fig_resource_names, use_container_width=True)
+
                     
                     # Cost breakdown by owner, environment, and project
                     tabs_breakdown = st.tabs(["👤 By Owner", "🌍 By Environment", "📁 By Project"])

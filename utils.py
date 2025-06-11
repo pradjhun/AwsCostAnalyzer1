@@ -3,16 +3,20 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
 import io
 
-def format_currency(amount: float) -> str:
+def format_currency(amount) -> str:
     """
     Format a numeric amount as currency string
     
     Args:
-        amount: Numeric amount to format
+        amount: Numeric amount to format (float or string)
         
     Returns:
         Formatted currency string
     """
+    # If already a string (already formatted), return as is
+    if isinstance(amount, str):
+        return amount
+    # If numeric, format it
     return f"${amount:,.2f}"
 
 def get_date_range(months: int) -> Tuple[datetime, datetime]:

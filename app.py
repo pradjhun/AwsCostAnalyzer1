@@ -84,6 +84,7 @@ with col1:
     # Monthly costs table
     if st.session_state.cost_data:
         df_monthly = pd.DataFrame(st.session_state.cost_data)
+        # Apply format_currency to handle both string and numeric amounts
         df_monthly['Amount'] = df_monthly['Amount'].apply(format_currency)
         
         # Display table with sorting

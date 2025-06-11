@@ -337,8 +337,63 @@ with tab5:
                 if detailed_data['usage_breakdown']:
                     df_usage = pd.DataFrame(detailed_data['usage_breakdown'])
                     
-                    # Display top usage types
-                    st.write("**Top Cost Drivers by Usage Type:**")
+                    # Add interactive filters for drill-down analysis
+                    st.write("**Usage Type Breakdown - Interactive Analysis:**")
+                    
+                    col_filter1, col_filter2, col_filter3 = st.columns([2, 2, 1])
+                    
+                    with col_filter1:
+                        # Month selection
+                        available_months = sorted(list(set([item['Month'] for item in detailed_data['usage_breakdown']])))
+                        selected_month = st.selectbox(
+                            "Select Month for Detailed Analysis:",
+                            available_months,
+                            key="month_selector"
+                        )
+                    
+                    with col_filter2:
+                        # Usage type selection based on selected month
+                        month_data = [item for item in detailed_data['usage_breakdown'] if item['Month'] == selected_month]
+                        usage_types = sorted(list(set([item['Usage_Type'] for item in month_data])))
+                        selected_usage_type = st.selectbox(
+                            "Select Usage Type:",
+                            usage_types,
+                            key="usage_type_selector"
+                        )
+                    
+                    with col_filter3:
+                        # Drill-down button
+                        if st.button("🔍 Get Details", key="drill_down_btn"):
+                            with st.spinner(f"Analyzing {selected_usage_type} for {selected_month}..."):
+                                try:
+                                    cost_service = AWSCostService()
+                                    start_date, end_date = get_date_range(6)
+                                    
+                                    # Convert month format for API call
+                                    month_parts = selected_month.split(' ')
+                                    month_num = {
+                                        'January': '01', 'February': '02', 'March': '03', 
+                                        'April': '04', 'May': '05', 'June': '06',
+                                        'July': '07', 'August': '08', 'September': '09', 
+                                        'October': '10', 'November': '11', 'December': '12'
+                                    }[month_parts[0]]
+                                    year = month_parts[1]
+                                    month_format = f"{year}-{month_num}"
+                                    
+                                    # Get detailed usage type breakdown
+                                    usage_details = cost_service.get_usage_type_details(
+                                        selected_service, selected_usage_type, month_format, start_date, end_date
+                                    )
+                                    
+                                    st.session_state.usage_type_details = usage_details
+                                    st.success("✅ Detailed analysis completed!")
+                                    st.rerun()
+                                    
+                                except Exception as e:
+                                    st.error(f"❌ Error getting details: {str(e)}")
+                    
+                    # Display main usage breakdown table
+                    st.write("**Usage Type Summary:**")
                     display_df = df_usage.drop('Cost_Numeric', axis=1)
                     st.dataframe(display_df, use_container_width=True, hide_index=True)
                     
@@ -399,6 +454,98 @@ with tab5:
                         hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
                     )
                     st.plotly_chart(fig_monthly, use_container_width=True)
+                
+                # Display detailed usage type analysis if available
+                if 'usage_type_details' in st.session_state and st.session_state.usage_type_details:
+                    usage_details = st.session_state.usage_type_details
+                    
+                    st.markdown("---")
+                    st.subheader(f"🔬 Detailed Analysis: {usage_details['usage_type']} ({usage_details['month']})")
+                    
+                    # Summary metrics for the specific usage type and month
+                    col_detail1, col_detail2, col_detail3 = st.columns(3)
+                    
+                    with col_detail1:
+                        st.metric("Total Cost", f"${usage_details['total_cost']:,.2f}")
+                    with col_detail2:
+                        st.metric("Total Usage", f"{usage_details['total_usage']:,.2f}")
+                    with col_detail3:
+                        avg_daily = usage_details['total_cost'] / len(usage_details['daily_breakdown']) if usage_details['daily_breakdown'] else 0
+                        st.metric("Avg Daily Cost", f"${avg_daily:,.2f}")
+                    
+                    # Daily trend chart
+                    if usage_details['daily_breakdown']:
+                        st.write("**Daily Cost Trend:**")
+                        df_daily = pd.DataFrame(usage_details['daily_breakdown'])
+                        
+                        fig_daily = px.line(
+                            df_daily,
+                            x='Date',
+                            y='Cost_Numeric',
+                            title=f"Daily Cost Trend - {usage_details['usage_type']} ({usage_details['month']})",
+                            markers=True
+                        )
+                        fig_daily.update_traces(
+                            hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
+                        )
+                        st.plotly_chart(fig_daily, use_container_width=True)
+                        
+                        # Daily breakdown table
+                        st.write("**Daily Breakdown:**")
+                        display_daily = df_daily.drop(['Cost_Numeric', 'Usage_Numeric'], axis=1)
+                        st.dataframe(display_daily, use_container_width=True, hide_index=True)
+                    
+                    # Operation breakdown
+                    if usage_details['operation_breakdown']:
+                        st.write("**Operations Breakdown:**")
+                        df_operations = pd.DataFrame(usage_details['operation_breakdown'])
+                        
+                        # Operations table
+                        display_operations = df_operations.drop(['Cost_Numeric', 'Usage_Numeric'], axis=1)
+                        st.dataframe(display_operations, use_container_width=True, hide_index=True)
+                        
+                        # Operations pie chart
+                        if len(df_operations) > 1:
+                            fig_operations = px.pie(
+                                df_operations,
+                                values='Cost_Numeric',
+                                names='Operation',
+                                title=f"Cost by Operation - {usage_details['usage_type']}"
+                            )
+                            fig_operations.update_traces(
+                                hovertemplate='<b>%{label}</b><br>Cost: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>'
+                            )
+                            st.plotly_chart(fig_operations, use_container_width=True)
+                    
+                    # Region breakdown
+                    if usage_details['region_breakdown']:
+                        st.write("**Regional Breakdown:**")
+                        df_regions = pd.DataFrame(usage_details['region_breakdown'])
+                        
+                        # Regions table
+                        display_regions = df_regions.drop('Cost_Numeric', axis=1)
+                        st.dataframe(display_regions, use_container_width=True, hide_index=True)
+                        
+                        # Regions bar chart
+                        if len(df_regions) > 1:
+                            fig_regions = px.bar(
+                                df_regions,
+                                x='Cost_Numeric',
+                                y='Region',
+                                orientation='h',
+                                title=f"Cost by Region - {usage_details['usage_type']}",
+                                labels={'Cost_Numeric': 'Cost (USD)', 'Region': 'AWS Region'}
+                            )
+                            fig_regions.update_traces(
+                                hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<extra></extra>'
+                            )
+                            st.plotly_chart(fig_regions, use_container_width=True)
+                    
+                    # Clear detailed analysis button
+                    if st.button("🗑️ Clear Detailed Analysis"):
+                        if 'usage_type_details' in st.session_state:
+                            del st.session_state.usage_type_details
+                        st.rerun()
             
             # Display AI recommendations if available
             if 'ai_recommendations' in st.session_state and st.session_state.ai_recommendations:

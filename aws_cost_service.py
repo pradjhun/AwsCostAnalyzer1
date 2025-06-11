@@ -437,3 +437,178 @@ class AWSCostService:
         except Exception as e:
             logger.error(f"Error generating AI recommendations: {str(e)}")
             return f"Unable to generate AI recommendations at this time. Error: {str(e)}\n\nPlease ensure you have access to AWS Bedrock Claude models in your region."
+    
+    def get_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        """
+        Get detailed breakdown for a specific usage type within a service for a specific month
+        
+        Args:
+            service_name: Name of the AWS service
+            usage_type: Specific usage type to analyze
+            month: Month to analyze (format: "YYYY-MM")
+            start_date: Start date for cost data
+            end_date: End date for cost data
+            
+        Returns:
+            Dictionary containing detailed usage type breakdown
+        """
+        try:
+            logger.info(f"Fetching detailed breakdown for {service_name} - {usage_type} in {month}")
+            
+            # Parse month to get specific date range
+            month_start = datetime.strptime(month, '%Y-%m')
+            if month_start.month == 12:
+                month_end = month_start.replace(year=month_start.year + 1, month=1, day=1)
+            else:
+                month_end = month_start.replace(month=month_start.month + 1, day=1)
+            
+            # Get detailed breakdown with multiple dimensions
+            response = self.cost_explorer.get_cost_and_usage(
+                TimePeriod={
+                    'Start': month_start.strftime('%Y-%m-%d'),
+                    'End': month_end.strftime('%Y-%m-%d')
+                },
+                Granularity='DAILY',
+                Metrics=['BlendedCost', 'UsageQuantity'],
+                GroupBy=[
+                    {
+                        'Type': 'DIMENSION',
+                        'Key': 'OPERATION'
+                    }
+                ],
+                Filter={
+                    'And': [
+                        {
+                            'Dimensions': {
+                                'Key': 'SERVICE',
+                                'Values': [service_name]
+                            }
+                        },
+                        {
+                            'Dimensions': {
+                                'Key': 'USAGE_TYPE',
+                                'Values': [usage_type]
+                            }
+                        }
+                    ]
+                }
+            )
+            
+            daily_breakdown = []
+            operation_breakdown = {}
+            total_cost = 0
+            total_usage = 0
+            
+            # Process daily data
+            for result in response['ResultsByTime']:
+                date = result['TimePeriod']['Start']
+                daily_cost = 0
+                daily_usage = 0
+                
+                for group in result['Groups']:
+                    operation = group['Keys'][0] if group['Keys'] else 'Unknown Operation'
+                    cost = float(group['Metrics']['BlendedCost']['Amount'])
+                    usage = float(group['Metrics']['UsageQuantity']['Amount'])
+                    
+                    daily_cost += cost
+                    daily_usage += usage
+                    
+                    if operation not in operation_breakdown:
+                        operation_breakdown[operation] = {'cost': 0, 'usage': 0}
+                    operation_breakdown[operation]['cost'] += cost
+                    operation_breakdown[operation]['usage'] += usage
+                
+                if daily_cost > 0:
+                    daily_breakdown.append({
+                        'Date': date,
+                        'Cost': f"${daily_cost:,.2f}",
+                        'Usage_Quantity': f"{daily_usage:,.2f}",
+                        'Cost_Numeric': daily_cost,
+                        'Usage_Numeric': daily_usage
+                    })
+                
+                total_cost += daily_cost
+                total_usage += daily_usage
+            
+            # Convert operation breakdown to list
+            operations = []
+            for operation, data in operation_breakdown.items():
+                if data['cost'] > 0:
+                    operations.append({
+                        'Operation': operation,
+                        'Cost': f"${data['cost']:,.2f}",
+                        'Usage_Quantity': f"{data['usage']:,.2f}",
+                        'Cost_Numeric': data['cost'],
+                        'Usage_Numeric': data['usage']
+                    })
+            
+            # Sort by cost (descending)
+            operations.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+            daily_breakdown.sort(key=lambda x: x['Date'])
+            
+            # Get region breakdown if available
+            try:
+                region_response = self.cost_explorer.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': month_start.strftime('%Y-%m-%d'),
+                        'End': month_end.strftime('%Y-%m-%d')
+                    },
+                    Granularity='MONTHLY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {
+                            'Type': 'DIMENSION',
+                            'Key': 'REGION'
+                        }
+                    ],
+                    Filter={
+                        'And': [
+                            {
+                                'Dimensions': {
+                                    'Key': 'SERVICE',
+                                    'Values': [service_name]
+                                }
+                            },
+                            {
+                                'Dimensions': {
+                                    'Key': 'USAGE_TYPE',
+                                    'Values': [usage_type]
+                                }
+                            }
+                        ]
+                    }
+                )
+                
+                regions = []
+                for result in region_response['ResultsByTime']:
+                    for group in result['Groups']:
+                        region = group['Keys'][0] if group['Keys'] else 'Unknown Region'
+                        cost = float(group['Metrics']['BlendedCost']['Amount'])
+                        
+                        if cost > 0:
+                            regions.append({
+                                'Region': region,
+                                'Cost': f"${cost:,.2f}",
+                                'Cost_Numeric': cost
+                            })
+                
+                regions.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+                
+            except Exception as e:
+                logger.warning(f"Could not fetch region data: {str(e)}")
+                regions = []
+            
+            return {
+                'service_name': service_name,
+                'usage_type': usage_type,
+                'month': month,
+                'total_cost': total_cost,
+                'total_usage': total_usage,
+                'daily_breakdown': daily_breakdown,
+                'operation_breakdown': operations,
+                'region_breakdown': regions
+            }
+            
+        except Exception as e:
+            logger.error(f"Error fetching usage type details: {str(e)}")
+            raise Exception(f"Failed to fetch usage type details: {str(e)}")

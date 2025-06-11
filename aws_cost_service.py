@@ -752,7 +752,16 @@ class AWSCostService:
             
         except Exception as e:
             logger.error(f"Error fetching resource details for {resource_id}: {str(e)}")
-            return resource_info
+            # Return default resource info structure in case of error
+            return {
+                'resource_id': resource_id,
+                'name': 'Unknown',
+                'tags': {},
+                'service': service_name,
+                'type': 'Unknown',
+                'region': 'Unknown',
+                'state': 'Unknown'
+            }
     
     def get_enhanced_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
         """

@@ -137,7 +137,7 @@ with col2:
 st.header("📊 Interactive Charts")
 
 # Create tabs for different chart types
-tab1, tab2, tab3, tab4 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Trend Analysis", "🥧 Service Breakdown", "📊 Monthly Comparison", "💡 Insights", "🔍 Individual Service Analysis"])
 
 with tab1:
     st.subheader("Monthly Cost Trend")
@@ -247,20 +247,177 @@ with tab4:
                 
                 for change in changes:
                     st.write(change)
-        
-        with col_insight2:
-            st.write("**Top Cost Drivers:**")
-            
-            # Show top 5 services by cost
-            df_services = pd.DataFrame(st.session_state.service_costs)
-            df_services['Amount_Numeric'] = df_services['Amount'].str.replace('$', '').str.replace(',', '').astype(float)
-            top_services = df_services.nlargest(5, 'Amount_Numeric')
-            
-            for _, service in top_services.iterrows():
-                percentage = (service['Amount_Numeric'] / df_services['Amount_Numeric'].sum()) * 100
-                st.write(f"• {service['Service']}: {service['Amount']} ({percentage:.1f}%)")
 
-# Export functionality
+with tab5:
+    st.subheader("Individual Service Deep Dive")
+    
+    if st.session_state.service_costs:
+        # Service selection dropdown
+        services = [service['Service'] for service in st.session_state.service_costs]
+        selected_service = st.selectbox(
+            "Select AWS Service for Detailed Analysis:",
+            services,
+            help="Choose a service to see detailed cost breakdown and AI recommendations"
+        )
+        
+        if selected_service:
+            col_service1, col_service2 = st.columns([2, 1])
+            
+            with col_service2:
+                # Action buttons
+                if st.button("🔍 Analyze Service", type="primary"):
+                    with st.spinner(f"Analyzing {selected_service} costs in detail..."):
+                        try:
+                            cost_service = AWSCostService()
+                            start_date, end_date = get_date_range(6)
+                            
+                            # Get detailed service analysis
+                            detailed_data = cost_service.get_service_detailed_costs(
+                                selected_service, start_date, end_date
+                            )
+                            
+                            # Store in session state
+                            st.session_state.detailed_service_data = detailed_data
+                            st.success("✅ Service analysis completed!")
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error analyzing service: {str(e)}")
+                
+                if st.button("🤖 Get AI Recommendations"):
+                    if 'detailed_service_data' in st.session_state and st.session_state.detailed_service_data:
+                        with st.spinner("Generating AI-powered cost optimization recommendations..."):
+                            try:
+                                cost_service = AWSCostService()
+                                recommendations = cost_service.generate_ai_recommendations(
+                                    st.session_state.detailed_service_data,
+                                    st.session_state.service_costs
+                                )
+                                
+                                st.session_state.ai_recommendations = recommendations
+                                st.success("✅ AI recommendations generated!")
+                                st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error generating recommendations: {str(e)}")
+                    else:
+                        st.warning("Please analyze the service first to get recommendations")
+            
+            with col_service1:
+                # Service overview metrics
+                selected_service_data = next(
+                    (s for s in st.session_state.service_costs if s['Service'] == selected_service), 
+                    None
+                )
+                
+                if selected_service_data:
+                    service_cost = float(selected_service_data['Amount'].replace('$', '').replace(',', ''))
+                    total_aws_cost = sum([
+                        float(s['Amount'].replace('$', '').replace(',', '')) 
+                        for s in st.session_state.service_costs
+                    ])
+                    percentage = (service_cost / total_aws_cost) * 100
+                    
+                    col_metric1, col_metric2, col_metric3 = st.columns(3)
+                    with col_metric1:
+                        st.metric("Service Cost (6 months)", selected_service_data['Amount'])
+                    with col_metric2:
+                        st.metric("% of Total AWS Spend", f"{percentage:.1f}%")
+                    with col_metric3:
+                        st.metric("Average Monthly", f"${service_cost/6:,.2f}")
+            
+            # Display detailed analysis if available
+            if 'detailed_service_data' in st.session_state and st.session_state.detailed_service_data:
+                detailed_data = st.session_state.detailed_service_data
+                
+                st.markdown("---")
+                st.subheader("📋 Usage Type Breakdown")
+                
+                # Usage breakdown table and chart
+                if detailed_data['usage_breakdown']:
+                    df_usage = pd.DataFrame(detailed_data['usage_breakdown'])
+                    
+                    # Display top usage types
+                    st.write("**Top Cost Drivers by Usage Type:**")
+                    display_df = df_usage.drop('Cost_Numeric', axis=1)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # Usage type pie chart
+                    if len(df_usage) > 1:
+                        fig_usage = px.pie(
+                            df_usage.head(10), 
+                            values='Cost_Numeric', 
+                            names='Usage_Type',
+                            title=f"Cost Distribution by Usage Type - {selected_service}"
+                        )
+                        fig_usage.update_traces(
+                            hovertemplate='<b>%{label}</b><br>Cost: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>'
+                        )
+                        st.plotly_chart(fig_usage, use_container_width=True)
+                
+                # Resource breakdown if available
+                if detailed_data['resource_breakdown']:
+                    st.subheader("🏗️ Resource-Level Cost Analysis")
+                    
+                    df_resources = pd.DataFrame(detailed_data['resource_breakdown'])
+                    st.write("**Top Cost Resources:**")
+                    display_resources = df_resources.drop('Cost_Numeric', axis=1)
+                    st.dataframe(display_resources, use_container_width=True, hide_index=True)
+                    
+                    # Resource cost bar chart
+                    if len(df_resources) > 1:
+                        fig_resources = px.bar(
+                            df_resources.head(10),
+                            x='Cost_Numeric',
+                            y='Resource_ID',
+                            orientation='h',
+                            title=f"Top Resources by Cost - {selected_service}",
+                            labels={'Cost_Numeric': 'Cost (USD)', 'Resource_ID': 'Resource ID'}
+                        )
+                        fig_resources.update_traces(
+                            hovertemplate='<b>%{y}</b><br>Cost: $%{x:,.2f}<extra></extra>'
+                        )
+                        st.plotly_chart(fig_resources, use_container_width=True)
+                
+                # Monthly trend for the service
+                if detailed_data['monthly_data']:
+                    st.subheader("📈 Monthly Cost Trend")
+                    
+                    monthly_df = pd.DataFrame([
+                        {'Month': month, 'Cost': cost} 
+                        for month, cost in detailed_data['monthly_data'].items()
+                    ])
+                    
+                    fig_monthly = px.line(
+                        monthly_df,
+                        x='Month',
+                        y='Cost',
+                        title=f"Monthly Cost Trend - {selected_service}",
+                        markers=True
+                    )
+                    fig_monthly.update_traces(
+                        hovertemplate='<b>%{x}</b><br>Cost: $%{y:,.2f}<extra></extra>'
+                    )
+                    st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            # Display AI recommendations if available
+            if 'ai_recommendations' in st.session_state and st.session_state.ai_recommendations:
+                st.markdown("---")
+                st.subheader("🤖 AI-Powered Cost Optimization Recommendations")
+                
+                # Display recommendations in an expandable container
+                with st.expander("💡 View Detailed Recommendations", expanded=True):
+                    st.markdown(st.session_state.ai_recommendations)
+                
+                # Clear recommendations button
+                if st.button("🗑️ Clear Recommendations"):
+                    if 'ai_recommendations' in st.session_state:
+                        del st.session_state.ai_recommendations
+                    st.rerun()
+    else:
+        st.info("Please refresh cost data first to enable service analysis")
+
+# Export functionality  
 st.header("📥 Export Options")
 col_export1, col_export2 = st.columns(2)
 

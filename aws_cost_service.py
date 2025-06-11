@@ -30,7 +30,8 @@ class AWSCostService:
             )
             
             self.cost_explorer = session.client('ce', region_name='us-east-1')  # Cost Explorer is only available in us-east-1
-            logger.info("AWS Cost Explorer client initialized successfully")
+            self.bedrock = session.client('bedrock-runtime', region_name=aws_region)
+            logger.info("AWS Cost Explorer and Bedrock clients initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize AWS Cost Explorer client: {str(e)}")
@@ -233,3 +234,206 @@ class AWSCostService:
         except Exception as e:
             logger.error(f"Error fetching cost forecast: {str(e)}")
             raise Exception(f"Failed to fetch cost forecast: {str(e)}")
+    
+    def get_service_detailed_costs(self, service_name: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        """
+        Get detailed cost breakdown for a specific AWS service with resource-level granularity
+        
+        Args:
+            service_name: Name of the AWS service
+            start_date: Start date for cost data
+            end_date: End date for cost data
+            
+        Returns:
+            Dictionary containing detailed service cost breakdown
+        """
+        try:
+            logger.info(f"Fetching detailed costs for {service_name} from {start_date.date()} to {end_date.date()}")
+            
+            # Get cost breakdown by usage type for the service
+            response = self.cost_explorer.get_cost_and_usage(
+                TimePeriod={
+                    'Start': start_date.strftime('%Y-%m-%d'),
+                    'End': end_date.strftime('%Y-%m-%d')
+                },
+                Granularity='MONTHLY',
+                Metrics=['BlendedCost', 'UsageQuantity'],
+                GroupBy=[
+                    {
+                        'Type': 'DIMENSION',
+                        'Key': 'USAGE_TYPE'
+                    }
+                ],
+                Filter={
+                    'Dimensions': {
+                        'Key': 'SERVICE',
+                        'Values': [service_name]
+                    }
+                }
+            )
+            
+            usage_breakdown = []
+            monthly_data = {}
+            
+            # Process response to get usage type breakdown
+            for result in response['ResultsByTime']:
+                month = datetime.strptime(result['TimePeriod']['Start'], '%Y-%m-%d').strftime('%B %Y')
+                
+                for group in result['Groups']:
+                    usage_type = group['Keys'][0] if group['Keys'] else 'Unknown Usage Type'
+                    cost = float(group['Metrics']['BlendedCost']['Amount'])
+                    usage = float(group['Metrics']['UsageQuantity']['Amount'])
+                    
+                    if cost > 0:
+                        usage_breakdown.append({
+                            'Month': month,
+                            'Usage_Type': usage_type,
+                            'Cost': f"${cost:,.2f}",
+                            'Usage_Quantity': f"{usage:,.2f}",
+                            'Cost_Numeric': cost
+                        })
+                        
+                        if month not in monthly_data:
+                            monthly_data[month] = 0
+                        monthly_data[month] += cost
+            
+            # Get resource-level breakdown if available
+            try:
+                resource_response = self.cost_explorer.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='MONTHLY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {
+                            'Type': 'DIMENSION',
+                            'Key': 'RESOURCE_ID'
+                        }
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': [service_name]
+                        }
+                    }
+                )
+                
+                resource_breakdown = []
+                for result in resource_response['ResultsByTime']:
+                    for group in result['Groups']:
+                        resource_id = group['Keys'][0] if group['Keys'] else 'Unknown Resource'
+                        cost = float(group['Metrics']['BlendedCost']['Amount'])
+                        
+                        if cost > 0 and resource_id != 'NoResourceId':
+                            resource_breakdown.append({
+                                'Resource_ID': resource_id,
+                                'Cost': f"${cost:,.2f}",
+                                'Cost_Numeric': cost
+                            })
+                
+                # Sort by cost (descending)
+                resource_breakdown.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+                
+            except Exception as e:
+                logger.warning(f"Could not fetch resource-level data for {service_name}: {str(e)}")
+                resource_breakdown = []
+            
+            # Sort usage breakdown by cost
+            usage_breakdown.sort(key=lambda x: x['Cost_Numeric'], reverse=True)
+            
+            # Calculate total cost for the service
+            total_cost = sum([item['Cost_Numeric'] for item in usage_breakdown])
+            
+            return {
+                'service_name': service_name,
+                'total_cost': total_cost,
+                'usage_breakdown': usage_breakdown,
+                'resource_breakdown': resource_breakdown[:20],  # Top 20 resources
+                'monthly_data': monthly_data
+            }
+            
+        except Exception as e:
+            logger.error(f"Error fetching detailed costs for {service_name}: {str(e)}")
+            raise Exception(f"Failed to fetch detailed cost data for {service_name}: {str(e)}")
+    
+    def generate_ai_recommendations(self, service_data: Dict[str, Any], all_services_data: List[Dict[str, Any]]) -> str:
+        """
+        Generate AI-powered cost optimization recommendations using AWS Bedrock
+        
+        Args:
+            service_data: Detailed cost data for the specific service
+            all_services_data: Cost data for all services for context
+            
+        Returns:
+            AI-generated recommendations as string
+        """
+        try:
+            import json
+            
+            # Prepare context for the AI
+            context = {
+                "service_name": service_data['service_name'],
+                "total_cost": service_data['total_cost'],
+                "usage_breakdown": service_data['usage_breakdown'][:10],  # Top 10 usage types
+                "resource_breakdown": service_data['resource_breakdown'][:10],  # Top 10 resources
+                "monthly_trends": service_data['monthly_data'],
+                "total_aws_spend": sum([float(s['Amount'].replace('$', '').replace(',', '')) for s in all_services_data])
+            }
+            
+            prompt = f"""
+            You are an AWS FinOps expert analyzing cost data. Based on the following AWS service cost breakdown, provide specific, actionable cost optimization recommendations.
+
+            Service Analysis:
+            - Service: {context['service_name']}
+            - Total Cost (6 months): ${context['total_cost']:,.2f}
+            - Percentage of total AWS spend: {(context['total_cost'] / context['total_aws_spend'] * 100):.1f}%
+
+            Usage Breakdown (Top cost drivers):
+            {json.dumps(context['usage_breakdown'], indent=2)}
+
+            Resource Breakdown (if available):
+            {json.dumps(context['resource_breakdown'], indent=2)}
+
+            Monthly Trends:
+            {json.dumps(context['monthly_trends'], indent=2)}
+
+            Please provide:
+            1. **Immediate Cost Optimization Opportunities** (3-5 specific actions)
+            2. **Resource Right-Sizing Recommendations** (if applicable)
+            3. **Architecture Optimization Suggestions**
+            4. **Potential Monthly Savings Estimate**
+            5. **Implementation Priority** (High/Medium/Low for each recommendation)
+
+            Keep recommendations practical, specific to the usage patterns shown, and include estimated savings percentages where possible.
+            """
+            
+            # Call AWS Bedrock Claude model
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 2000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            })
+            
+            response = self.bedrock.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                contentType="application/json",
+                accept="application/json",
+                body=body
+            )
+            
+            response_body = json.loads(response['body'].read())
+            recommendations = response_body['content'][0]['text']
+            
+            logger.info(f"Successfully generated AI recommendations for {service_data['service_name']}")
+            return recommendations
+            
+        except Exception as e:
+            logger.error(f"Error generating AI recommendations: {str(e)}")
+            return f"Unable to generate AI recommendations at this time. Error: {str(e)}\n\nPlease ensure you have access to AWS Bedrock Claude models in your region."

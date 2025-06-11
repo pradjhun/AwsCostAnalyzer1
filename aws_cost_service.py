@@ -700,150 +700,147 @@ class AWSCostService:
             logger.error(f"Error fetching usage type details: {str(e)}")
             raise Exception(f"Failed to fetch usage type details: {str(e)}")
     
-    def get_resource_details(self, resource_id: str, service_name: str) -> Dict[str, Any]:
+    def get_actual_resource_names(self, service_name: str, usage_type: str, month: str) -> List[Dict[str, Any]]:
         """
-        Get detailed information about a specific AWS resource including name and tags
+        Get actual resource names and identifiers for specific services
         
         Args:
-            resource_id: AWS resource ID
             service_name: AWS service name
+            usage_type: Usage type to analyze
+            month: Month to analyze
             
         Returns:
-            Dictionary containing resource details
+            List of dictionaries containing actual resource information
         """
+        resources = []
+        
         try:
-            resource_info = {
-                'resource_id': resource_id,
-                'name': 'Unknown',
-                'tags': {},
-                'service': service_name,
-                'type': 'Unknown',
-                'region': 'Unknown',
-                'state': 'Unknown'
-            }
-            
-            # Skip if no resource ID or generic IDs
-            if not resource_id or resource_id in ['NoResourceId', 'Unknown Resource']:
-                return resource_info
-            
-            # EC2 Instances
-            if 'i-' in resource_id and any(s in service_name for s in ['EC2', 'Elastic Compute']):
+            # Amazon Q Business - get indices and applications
+            if 'Amazon Q' in service_name:
                 try:
-                    response = self.ec2.describe_instances(InstanceIds=[resource_id])
-                    if response['Reservations']:
-                        instance = response['Reservations'][0]['Instances'][0]
-                        resource_info.update({
-                            'name': next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), resource_id),
-                            'type': instance.get('InstanceType', 'Unknown'),
-                            'state': instance.get('State', {}).get('Name', 'Unknown'),
-                            'region': instance.get('Placement', {}).get('AvailabilityZone', 'Unknown'),
-                            'tags': {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
-                        })
-                except Exception as e:
-                    logger.warning(f"Could not fetch EC2 details for {resource_id}: {str(e)}")
-            
-            # RDS Instances
-            elif any(s in service_name for s in ['RDS', 'Relational Database']):
-                try:
-                    response = self.rds.describe_db_instances(DBInstanceIdentifier=resource_id)
-                    if response['DBInstances']:
-                        db = response['DBInstances'][0]
-                        resource_info.update({
-                            'name': db.get('DBName', resource_id),
-                            'type': db.get('DBInstanceClass', 'Unknown'),
-                            'state': db.get('DBInstanceStatus', 'Unknown'),
-                            'region': db.get('AvailabilityZone', 'Unknown')
-                        })
+                    # Initialize Q Business client
+                    qbusiness = boto3.client('qbusiness', region_name=self.cost_explorer.meta.region_name)
+                    
+                    # List applications
+                    applications = qbusiness.list_applications()
+                    for app in applications.get('applications', []):
+                        app_id = app.get('applicationId')
+                        app_name = app.get('displayName', app_id)
                         
-                        # Get tags
+                        # Get indices for this application
                         try:
-                            tags_response = self.rds.list_tags_for_resource(ResourceName=db['DBInstanceArn'])
-                            resource_info['tags'] = {tag['Key']: tag['Value'] for tag in tags_response.get('TagList', [])}
-                        except:
-                            pass
+                            indices = qbusiness.list_indices(applicationId=app_id)
+                            for index in indices.get('indices', []):
+                                index_id = index.get('indexId')
+                                index_name = index.get('displayName', index_id)
+                                resources.append({
+                                    'resource_name': f"{app_name} - {index_name}",
+                                    'resource_id': f"{app_id}/{index_id}",
+                                    'resource_type': 'Q Business Index',
+                                    'application': app_name,
+                                    'index_name': index_name,
+                                    'status': index.get('status', 'Unknown')
+                                })
+                        except Exception as e:
+                            logger.debug(f"Could not list indices for app {app_id}: {str(e)}")
+                            
                 except Exception as e:
-                    logger.warning(f"Could not fetch RDS details for {resource_id}: {str(e)}")
+                    logger.warning(f"Could not access Q Business resources: {str(e)}")
             
-            # S3 Buckets
-            elif any(s in service_name for s in ['S3', 'Simple Storage']):
+            # EC2 instances
+            elif 'EC2' in service_name or 'Elastic Compute' in service_name:
                 try:
-                    # For S3, resource_id might be bucket name
-                    bucket_name = resource_id.split('/')[-1] if '/' in resource_id else resource_id
-                    
-                    # Check if bucket exists and get info
-                    self.s3.head_bucket(Bucket=bucket_name)
-                    resource_info.update({
-                        'name': bucket_name,
-                        'type': 'S3 Bucket',
-                        'state': 'Active'
-                    })
-                    
-                    # Get bucket tags
-                    try:
-                        tags_response = self.s3.get_bucket_tagging(Bucket=bucket_name)
-                        resource_info['tags'] = {tag['Key']: tag['Value'] for tag in tags_response.get('TagSet', [])}
-                    except:
-                        pass
-                        
+                    response = self.ec2.describe_instances()
+                    for reservation in response['Reservations']:
+                        for instance in reservation['Instances']:
+                            instance_id = instance['InstanceId']
+                            name_tag = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), instance_id)
+                            resources.append({
+                                'resource_name': name_tag,
+                                'resource_id': instance_id,
+                                'resource_type': instance.get('InstanceType', 'Unknown'),
+                                'state': instance.get('State', {}).get('Name', 'Unknown'),
+                                'az': instance.get('Placement', {}).get('AvailabilityZone', 'Unknown')
+                            })
                 except Exception as e:
-                    logger.warning(f"Could not fetch S3 details for {resource_id}: {str(e)}")
+                    logger.warning(f"Could not list EC2 instances: {str(e)}")
             
-            # Lambda Functions
-            elif any(s in service_name for s in ['Lambda', 'AWS Lambda']):
+            # RDS instances
+            elif 'RDS' in service_name or 'Relational Database' in service_name:
                 try:
-                    response = self.lambda_client.get_function(FunctionName=resource_id)
-                    function_config = response['Configuration']
-                    resource_info.update({
-                        'name': function_config.get('FunctionName', resource_id),
-                        'type': f"Lambda ({function_config.get('Runtime', 'Unknown')})",
-                        'state': function_config.get('State', 'Unknown'),
-                        'region': function_config.get('Environment', {}).get('Variables', {}).get('AWS_REGION', 'Unknown')
-                    })
-                    
-                    # Get tags
-                    try:
-                        tags_response = self.lambda_client.list_tags(Resource=function_config['FunctionArn'])
-                        resource_info['tags'] = tags_response.get('Tags', {})
-                    except:
-                        pass
-                        
+                    response = self.rds.describe_db_instances()
+                    for db in response['DBInstances']:
+                        db_id = db['DBInstanceIdentifier']
+                        resources.append({
+                            'resource_name': db.get('DBName', db_id),
+                            'resource_id': db_id,
+                            'resource_type': db.get('DBInstanceClass', 'Unknown'),
+                            'state': db.get('DBInstanceStatus', 'Unknown'),
+                            'engine': db.get('Engine', 'Unknown')
+                        })
                 except Exception as e:
-                    logger.warning(f"Could not fetch Lambda details for {resource_id}: {str(e)}")
+                    logger.warning(f"Could not list RDS instances: {str(e)}")
             
-            # Try generic resource groups tagging API as fallback
+            # S3 buckets
+            elif 'S3' in service_name or 'Simple Storage' in service_name:
+                try:
+                    response = self.s3.list_buckets()
+                    for bucket in response['Buckets']:
+                        bucket_name = bucket['Name']
+                        resources.append({
+                            'resource_name': bucket_name,
+                            'resource_id': bucket_name,
+                            'resource_type': 'S3 Bucket',
+                            'creation_date': bucket.get('CreationDate', 'Unknown')
+                        })
+                except Exception as e:
+                    logger.warning(f"Could not list S3 buckets: {str(e)}")
+            
+            # Lambda functions
+            elif 'Lambda' in service_name:
+                try:
+                    response = self.lambda_client.list_functions()
+                    for function in response['Functions']:
+                        function_name = function['FunctionName']
+                        resources.append({
+                            'resource_name': function_name,
+                            'resource_id': function_name,
+                            'resource_type': f"Lambda ({function.get('Runtime', 'Unknown')})",
+                            'state': function.get('State', 'Unknown')
+                        })
+                except Exception as e:
+                    logger.warning(f"Could not list Lambda functions: {str(e)}")
+            
+            # Use Resource Groups Tagging API as fallback
             else:
                 try:
+                    # Try to get resources using the resource groups API
                     response = self.resource_groups.get_resources(
-                        ResourcesPerPage=1,
+                        ResourcesPerPage=100,
                         ResourceTypeFilters=[service_name] if service_name else []
                     )
                     
                     for resource in response.get('ResourceTagMappingList', []):
-                        if resource_id in resource.get('ResourceARN', ''):
-                            resource_info.update({
-                                'name': resource.get('ResourceARN', '').split('/')[-1],
-                                'tags': {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
-                            })
-                            break
-                            
+                        arn = resource.get('ResourceARN', '')
+                        resource_id = arn.split('/')[-1] if '/' in arn else arn.split(':')[-1]
+                        name_tag = next((tag['Value'] for tag in resource.get('Tags', []) if tag['Key'] == 'Name'), resource_id)
+                        
+                        resources.append({
+                            'resource_name': name_tag,
+                            'resource_id': resource_id,
+                            'resource_type': arn.split(':')[2] if ':' in arn else 'Unknown',
+                            'arn': arn
+                        })
+                        
                 except Exception as e:
-                    logger.warning(f"Could not fetch generic resource details for {resource_id}: {str(e)}")
+                    logger.warning(f"Could not use Resource Groups API for {service_name}: {str(e)}")
             
-            logger.info(f"Retrieved resource details for {resource_id}")
-            return resource_info
+            logger.info(f"Found {len(resources)} resources for {service_name}")
+            return resources
             
         except Exception as e:
-            logger.error(f"Error fetching resource details for {resource_id}: {str(e)}")
-            # Return default resource info structure in case of error
-            return {
-                'resource_id': resource_id,
-                'name': 'Unknown',
-                'tags': {},
-                'service': service_name,
-                'type': 'Unknown',
-                'region': 'Unknown',
-                'state': 'Unknown'
-            }
+            logger.error(f"Error getting resource names for {service_name}: {str(e)}")
+            return []
     
     def get_enhanced_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
         """
@@ -864,6 +861,9 @@ class AWSCostService:
             
             # Get the basic usage type details first
             basic_details = self.get_usage_type_details(service_name, usage_type, month, start_date, end_date)
+            
+            # Get actual resource names for this service
+            actual_resources = self.get_actual_resource_names(service_name, usage_type, month)
             
             # Parse month to get specific date range
             month_start = datetime.strptime(month, '%Y-%m')
@@ -1019,6 +1019,7 @@ class AWSCostService:
                     unique_resources.append(resource)
             
             basic_details['enhanced_resources'] = unique_resources[:50]  # Top 50 unique resources
+            basic_details['actual_resources'] = actual_resources  # Add actual resource names
             
             if not enhanced_resources:
                 logger.warning(f"Could not fetch enhanced resource data using available dimensions")

@@ -134,34 +134,38 @@ with config_tabs[1]:
     
     # Email verification section
     if email_address:
-        cost_service = AWSCostService()
-        
-        # Validate email format
-        if cost_service.validate_email(email_address):
-            st.success("✅ Valid email format")
+        try:
+            cost_service = AWSCostService()
             
-            # Check SES verification status
-            verification_status = cost_service.verify_ses_email(email_address)
-            
-            if verification_status['verified']:
-                st.success("✅ Email verified with AWS SES")
-                st.session_state.budget_settings['email_verified'] = True
-            elif verification_status['pending_verification']:
-                st.warning("⏳ Email verification pending. Check your inbox for verification email.")
-                st.session_state.budget_settings['email_verified'] = False
-            else:
-                st.warning("❌ Email not verified with AWS SES")
-                st.session_state.budget_settings['email_verified'] = False
+            # Validate email format
+            if cost_service.validate_email(email_address):
+                st.success("✅ Valid email format")
                 
-                if st.button("📧 Send Verification Email"):
-                    with st.spinner("Sending verification email..."):
-                        result = cost_service.send_verification_email(email_address)
-                        if result['success']:
-                            st.success(result['message'])
-                        else:
-                            st.error(result['message'])
-        else:
-            st.error("❌ Invalid email format")
+                # Check SES verification status
+                verification_status = cost_service.verify_ses_email(email_address)
+                
+                if verification_status['verified']:
+                    st.success("✅ Email verified with AWS SES")
+                    st.session_state.budget_settings['email_verified'] = True
+                elif verification_status['pending_verification']:
+                    st.warning("⏳ Email verification pending. Check your inbox for verification email.")
+                    st.session_state.budget_settings['email_verified'] = False
+                else:
+                    st.warning("❌ Email not verified with AWS SES")
+                    st.session_state.budget_settings['email_verified'] = False
+                    
+                    if st.button("📧 Send Verification Email"):
+                        with st.spinner("Sending verification email..."):
+                            result = cost_service.send_verification_email(email_address)
+                            if result['success']:
+                                st.success(result['message'])
+                            else:
+                                st.error(result['message'])
+            else:
+                st.error("❌ Invalid email format")
+                st.session_state.budget_settings['email_verified'] = False
+        except Exception as e:
+            st.error(f"Error initializing AWS services: {str(e)}")
             st.session_state.budget_settings['email_verified'] = False
     
     # Budget monitoring controls
@@ -177,17 +181,21 @@ with config_tabs[1]:
     
     with col_control2:
         if st.button("💾 Save Settings"):
-            if budget_amount > 0 and email_address and cost_service.validate_email(email_address):
-                st.session_state.budget_settings = {
-                    'budget_amount': budget_amount,
-                    'email': email_address,
-                    'enabled': enable_notifications,
-                    'email_verified': st.session_state.budget_settings.get('email_verified', False)
-                }
-                st.success("✅ Budget settings saved successfully!")
-                st.rerun()
-            else:
-                st.error("❌ Please enter a valid budget amount and email address")
+            try:
+                cost_service = AWSCostService()
+                if budget_amount > 0 and email_address and cost_service.validate_email(email_address):
+                    st.session_state.budget_settings = {
+                        'budget_amount': budget_amount,
+                        'email': email_address,
+                        'enabled': enable_notifications,
+                        'email_verified': st.session_state.budget_settings.get('email_verified', False)
+                    }
+                    st.success("✅ Budget settings saved successfully!")
+                    st.rerun()
+                else:
+                    st.error("❌ Please enter a valid budget amount and email address")
+            except Exception as e:
+                st.error(f"Error saving settings: {str(e)}")
     
     with col_control3:
         if st.button("🔍 Check Budget Status"):
@@ -298,6 +306,79 @@ with st.sidebar:
         st.info("Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables")
     
     st.text(f"Region: {aws_region}")
+    
+    # Budget Quick Setup Section
+    st.subheader("💰 Budget Monitor")
+    
+    # Initialize budget settings if not exists
+    if 'budget_settings' not in st.session_state:
+        st.session_state.budget_settings = {
+            'budget_amount': 0.0,
+            'email': '',
+            'enabled': False,
+            'email_verified': False
+        }
+    
+    # Quick budget setup
+    budget_amount = st.number_input(
+        "Monthly Budget ($)",
+        min_value=0.0,
+        value=st.session_state.budget_settings['budget_amount'],
+        step=50.0,
+        key="sidebar_budget"
+    )
+    
+    email_address = st.text_input(
+        "Alert Email",
+        value=st.session_state.budget_settings['email'],
+        placeholder="email@example.com",
+        key="sidebar_email"
+    )
+    
+    if st.button("💾 Save Budget Settings"):
+        if budget_amount > 0 and email_address:
+            try:
+                cost_service = AWSCostService()
+                if cost_service.validate_email(email_address):
+                    st.session_state.budget_settings.update({
+                        'budget_amount': budget_amount,
+                        'email': email_address,
+                        'enabled': True
+                    })
+                    st.success("Budget settings saved!")
+                    st.rerun()
+                else:
+                    st.error("Invalid email format")
+            except Exception as e:
+                st.error("Error initializing cost service")
+        else:
+            st.warning("Enter budget amount and email")
+    
+    # Quick budget check
+    if st.session_state.budget_settings['budget_amount'] > 0:
+        if st.button("🔍 Check Budget Now"):
+            try:
+                cost_service = AWSCostService()
+                current_cost = cost_service.get_current_month_cost()
+                budget_amount = st.session_state.budget_settings['budget_amount']
+                percentage = (current_cost / budget_amount) * 100 if budget_amount > 0 else 0
+                
+                st.metric("Current Month", f"${current_cost:,.2f}")
+                st.metric("Budget Usage", f"{percentage:.1f}%")
+                
+                if percentage >= 100:
+                    st.error("Budget exceeded!")
+                elif percentage >= 90:
+                    st.warning("90% budget used")
+                elif percentage >= 80:
+                    st.warning("80% budget used")
+                else:
+                    st.success("Budget on track")
+                    
+            except Exception as e:
+                st.error("Error checking budget")
+    
+    st.markdown("---")
     
     # Quick preset buttons
     st.subheader("Quick Date Presets")

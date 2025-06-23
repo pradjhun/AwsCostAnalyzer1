@@ -67,38 +67,212 @@ with config_tabs[0]:
                 st.error("Start date cannot be in the future")
             else:
                 with st.spinner("Fetching cost data for selected date range..."):
-                try:
-                    cost_service = AWSCostService()
-                    
-                    # Convert dates to datetime objects
-                    selected_start = datetime.combine(start_date_input, datetime.min.time())
-                    selected_end = datetime.combine(end_date_input, datetime.min.time())
-                    
-                    # Get monthly costs for selected range
-                    st.session_state.cost_data = cost_service.get_monthly_costs(selected_start, selected_end)
-                    
-                    # Get service breakdown for selected range
-                    st.session_state.service_costs = cost_service.get_costs_by_service(selected_start, selected_end)
-                    
-                    # Get daily costs if range is <= 31 days
-                    if (end_date_input - start_date_input).days <= 31:
-                        st.session_state.daily_costs = cost_service.get_daily_costs(selected_start, selected_end)
-                    else:
-                        st.session_state.daily_costs = []
-                    
-                    # Store date range info
-                    st.session_state.current_date_range = {
-                        'start': start_date_input,
-                        'end': end_date_input,
-                        'days': (end_date_input - start_date_input).days
-                    }
-                    st.session_state.last_refresh = datetime.now()
-                    
-                    st.success(f"✅ Analysis completed for {start_date_input} to {end_date_input}")
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ Error fetching cost data: {str(e)}")
+                    try:
+                        cost_service = AWSCostService()
+                        
+                        # Convert dates to datetime objects
+                        selected_start = datetime.combine(start_date_input, datetime.min.time())
+                        selected_end = datetime.combine(end_date_input, datetime.min.time())
+                        
+                        # Get monthly costs for selected range
+                        st.session_state.cost_data = cost_service.get_monthly_costs(selected_start, selected_end)
+                        
+                        # Get service breakdown for selected range
+                        st.session_state.service_costs = cost_service.get_costs_by_service(selected_start, selected_end)
+                        
+                        # Get daily costs if range is <= 31 days
+                        if (end_date_input - start_date_input).days <= 31:
+                            st.session_state.daily_costs = cost_service.get_daily_costs(selected_start, selected_end)
+                        else:
+                            st.session_state.daily_costs = []
+                        
+                        # Store date range info
+                        st.session_state.current_date_range = {
+                            'start': start_date_input,
+                            'end': end_date_input,
+                            'days': (end_date_input - start_date_input).days
+                        }
+                        st.session_state.last_refresh = datetime.now()
+                        
+                        st.success(f"✅ Analysis completed for {start_date_input} to {end_date_input}")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error fetching cost data: {str(e)}")
+
+with config_tabs[1]:
+    st.subheader("Budget Notification Configuration")
+    
+    # Initialize session state for budget settings
+    if 'budget_settings' not in st.session_state:
+        st.session_state.budget_settings = {
+            'budget_amount': 0.0,
+            'email': '',
+            'enabled': False,
+            'email_verified': False
+        }
+    
+    # Budget configuration form
+    col_budget1, col_budget2 = st.columns([2, 2])
+    
+    with col_budget1:
+        budget_amount = st.number_input(
+            "Monthly Budget Amount ($)",
+            min_value=0.0,
+            value=st.session_state.budget_settings['budget_amount'],
+            step=10.0,
+            help="Set your monthly AWS spending budget"
+        )
+    
+    with col_budget2:
+        email_address = st.text_input(
+            "Notification Email",
+            value=st.session_state.budget_settings['email'],
+            placeholder="your-email@example.com",
+            help="Email address to receive budget notifications"
+        )
+    
+    # Email verification section
+    if email_address:
+        cost_service = AWSCostService()
+        
+        # Validate email format
+        if cost_service.validate_email(email_address):
+            st.success("✅ Valid email format")
+            
+            # Check SES verification status
+            verification_status = cost_service.verify_ses_email(email_address)
+            
+            if verification_status['verified']:
+                st.success("✅ Email verified with AWS SES")
+                st.session_state.budget_settings['email_verified'] = True
+            elif verification_status['pending_verification']:
+                st.warning("⏳ Email verification pending. Check your inbox for verification email.")
+                st.session_state.budget_settings['email_verified'] = False
+            else:
+                st.warning("❌ Email not verified with AWS SES")
+                st.session_state.budget_settings['email_verified'] = False
+                
+                if st.button("📧 Send Verification Email"):
+                    with st.spinner("Sending verification email..."):
+                        result = cost_service.send_verification_email(email_address)
+                        if result['success']:
+                            st.success(result['message'])
+                        else:
+                            st.error(result['message'])
+        else:
+            st.error("❌ Invalid email format")
+            st.session_state.budget_settings['email_verified'] = False
+    
+    # Budget monitoring controls
+    st.markdown("---")
+    col_control1, col_control2, col_control3 = st.columns([2, 1, 1])
+    
+    with col_control1:
+        enable_notifications = st.checkbox(
+            "Enable Budget Notifications",
+            value=st.session_state.budget_settings['enabled'],
+            help="Enable automatic email notifications when budget thresholds are reached"
+        )
+    
+    with col_control2:
+        if st.button("💾 Save Settings"):
+            if budget_amount > 0 and email_address and cost_service.validate_email(email_address):
+                st.session_state.budget_settings = {
+                    'budget_amount': budget_amount,
+                    'email': email_address,
+                    'enabled': enable_notifications,
+                    'email_verified': st.session_state.budget_settings.get('email_verified', False)
+                }
+                st.success("✅ Budget settings saved successfully!")
+                st.rerun()
+            else:
+                st.error("❌ Please enter a valid budget amount and email address")
+    
+    with col_control3:
+        if st.button("🔍 Check Budget Status"):
+            if st.session_state.budget_settings['budget_amount'] > 0:
+                with st.spinner("Checking current month costs..."):
+                    try:
+                        cost_service = AWSCostService()
+                        current_cost = cost_service.get_current_month_cost()
+                        
+                        budget_status = cost_service.check_budget_threshold(
+                            st.session_state.budget_settings['budget_amount'],
+                            current_cost,
+                            st.session_state.budget_settings['email']
+                        )
+                        
+                        # Display budget status
+                        st.markdown("---")
+                        st.subheader("💰 Current Budget Status")
+                        
+                        col_status1, col_status2, col_status3, col_status4 = st.columns(4)
+                        
+                        with col_status1:
+                            st.metric("Budget Amount", f"${budget_status['budget_amount']:,.2f}")
+                        with col_status2:
+                            st.metric("Current Cost", f"${budget_status['current_cost']:,.2f}")
+                        with col_status3:
+                            remaining = budget_status['remaining_budget']
+                            delta_color = "normal" if remaining >= 0 else "inverse"
+                            st.metric("Remaining Budget", f"${remaining:,.2f}")
+                        with col_status4:
+                            percentage = budget_status['threshold_percentage']
+                            st.metric("Usage Percentage", f"{percentage:.1f}%")
+                        
+                        # Alert status
+                        alert_level = budget_status.get('alert_level', 'normal')
+                        if alert_level == 'critical':
+                            st.error(f"🚨 {budget_status['message']}")
+                        elif alert_level == 'high':
+                            st.warning(f"⚠️ {budget_status['message']}")
+                        elif alert_level == 'medium':
+                            st.warning(f"📊 {budget_status['message']}")
+                        else:
+                            st.success(f"✅ {budget_status['message']}")
+                        
+                        # Send notification if enabled and thresholds reached
+                        if (enable_notifications and 
+                            st.session_state.budget_settings['email_verified'] and 
+                            alert_level != 'normal'):
+                            
+                            notification_result = cost_service.send_budget_notification(budget_status)
+                            
+                            if notification_result['sent']:
+                                st.info(f"📧 Notification sent to {email_address}")
+                            else:
+                                st.warning(f"📧 Notification not sent: {notification_result.get('reason', 'Unknown error')}")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error checking budget status: {str(e)}")
+            else:
+                st.warning("Please set a budget amount first")
+    
+    # Display current settings
+    if st.session_state.budget_settings['budget_amount'] > 0:
+        st.markdown("---")
+        st.subheader("📋 Current Settings")
+        
+        settings_data = {
+            "Setting": ["Budget Amount", "Email Address", "Notifications Enabled", "Email Verified"],
+            "Value": [
+                f"${st.session_state.budget_settings['budget_amount']:,.2f}",
+                st.session_state.budget_settings['email'],
+                "Yes" if st.session_state.budget_settings['enabled'] else "No",
+                "Yes" if st.session_state.budget_settings['email_verified'] else "No"
+            ]
+        }
+        
+        st.table(pd.DataFrame(settings_data))
+        
+        # Budget thresholds info
+        st.info("""
+        **Notification Thresholds:**
+        - 80% of budget: Warning notification
+        - 90% of budget: High alert notification  
+        - 100%+ of budget: Critical alert notification
+        """)
 
 # Display current date range
 if 'current_date_range' in st.session_state:

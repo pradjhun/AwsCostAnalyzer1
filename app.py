@@ -27,40 +27,46 @@ if 'service_costs' not in st.session_state:
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = None
 
-# Date Range Configuration (Top of page)
-st.header("📅 Date Range Configuration")
+# Configuration Area
+st.header("⚙️ Configuration")
 
-col_date1, col_date2, col_date3 = st.columns([2, 2, 1])
+# Create tabs for different configuration options
+config_tabs = st.tabs(["📅 Date Range", "💰 Budget Notifications"])
 
-with col_date1:
-    start_date_input = st.date_input(
-        "Start Date",
-        value=datetime.now() - timedelta(days=180),  # Default to 6 months ago
-        max_value=datetime.now().date(),
-        help="Select the start date for cost analysis"
-    )
+with config_tabs[0]:
+    st.subheader("Date Range Configuration")
 
-with col_date2:
-    end_date_input = st.date_input(
-        "End Date",
-        value=datetime.now().date(),
-        max_value=datetime.now().date(),
-        help="Select the end date for cost analysis"
-    )
+    col_date1, col_date2, col_date3 = st.columns([2, 2, 1])
 
-with col_date3:
-    st.write("")  # Spacing
-    st.write("")  # Spacing
-    if st.button("🔍 Analyze Date Range", type="primary"):
-        # Validate date range
-        if start_date_input >= end_date_input:
-            st.error("Start date must be before end date")
-        elif (end_date_input - start_date_input).days > 365:
-            st.error("Date range cannot exceed 365 days")
-        elif start_date_input > datetime.now().date():
-            st.error("Start date cannot be in the future")
-        else:
-            with st.spinner("Fetching cost data for selected date range..."):
+    with col_date1:
+        start_date_input = st.date_input(
+            "Start Date",
+            value=datetime.now() - timedelta(days=180),  # Default to 6 months ago
+            max_value=datetime.now().date(),
+            help="Select the start date for cost analysis"
+        )
+
+    with col_date2:
+        end_date_input = st.date_input(
+            "End Date",
+            value=datetime.now().date(),
+            max_value=datetime.now().date(),
+            help="Select the end date for cost analysis"
+        )
+
+    with col_date3:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        if st.button("🔍 Analyze Date Range", type="primary"):
+            # Validate date range
+            if start_date_input >= end_date_input:
+                st.error("Start date must be before end date")
+            elif (end_date_input - start_date_input).days > 365:
+                st.error("Date range cannot exceed 365 days")
+            elif start_date_input > datetime.now().date():
+                st.error("Start date cannot be in the future")
+            else:
+                with st.spinner("Fetching cost data for selected date range..."):
                 try:
                     cost_service = AWSCostService()
                     

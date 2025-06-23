@@ -1,6 +1,8 @@
 import boto3
 import os
 import numpy as np
+import json
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import logging
@@ -37,6 +39,7 @@ class AWSCostService:
             self.s3 = session.client('s3', region_name=aws_region)
             self.lambda_client = session.client('lambda', region_name=aws_region)
             self.resource_groups = session.client('resourcegroupstaggingapi', region_name=aws_region)
+            self.ses_client = session.client('ses', region_name=aws_region)  # For budget notifications
             logger.info("AWS Cost Explorer, Bedrock, and resource clients initialized successfully")
             
         except Exception as e:
@@ -1152,6 +1155,279 @@ class AWSCostService:
             logger.debug(f"Error generating optimization recommendations: {str(e)}")
         
         return recommendations
+
+    def validate_email(self, email: str) -> bool:
+        """Validate email address format"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
+
+    def verify_ses_email(self, email: str) -> Dict[str, Any]:
+        """Verify email address with SES"""
+        try:
+            response = self.ses_client.get_identity_verification_attributes(
+                Identities=[email]
+            )
+            
+            verification_status = response.get('VerificationAttributes', {}).get(email, {}).get('VerificationStatus', 'NotStarted')
+            
+            return {
+                'email': email,
+                'verified': verification_status == 'Success',
+                'status': verification_status,
+                'pending_verification': verification_status == 'Pending'
+            }
+        except Exception as e:
+            logger.warning(f"Could not check SES verification status for {email}: {str(e)}")
+            return {
+                'email': email,
+                'verified': False,
+                'status': 'Unknown',
+                'pending_verification': False,
+                'error': str(e)
+            }
+
+    def send_verification_email(self, email: str) -> Dict[str, Any]:
+        """Send verification email through SES"""
+        try:
+            self.ses_client.verify_email_identity(EmailAddress=email)
+            
+            return {
+                'success': True,
+                'message': f'Verification email sent to {email}. Please check your inbox and click the verification link.',
+                'email': email
+            }
+        except Exception as e:
+            logger.error(f"Failed to send verification email to {email}: {str(e)}")
+            return {
+                'success': False,
+                'message': f'Failed to send verification email: {str(e)}',
+                'email': email,
+                'error': str(e)
+            }
+
+    def check_budget_threshold(self, budget_amount: float, current_month_cost: float, email: str) -> Dict[str, Any]:
+        """Check if current costs exceed budget threshold"""
+        try:
+            threshold_percentage = (current_month_cost / budget_amount) * 100 if budget_amount > 0 else 0
+            
+            budget_status = {
+                'budget_amount': budget_amount,
+                'current_cost': current_month_cost,
+                'remaining_budget': budget_amount - current_month_cost,
+                'threshold_percentage': threshold_percentage,
+                'email': email,
+                'exceeded': current_month_cost > budget_amount,
+                'warning_80': threshold_percentage >= 80,
+                'warning_90': threshold_percentage >= 90,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Determine notification level
+            if budget_status['exceeded']:
+                budget_status['alert_level'] = 'critical'
+                budget_status['message'] = f"Budget exceeded! Current cost ${current_month_cost:,.2f} exceeds budget ${budget_amount:,.2f}"
+            elif budget_status['warning_90']:
+                budget_status['alert_level'] = 'high'
+                budget_status['message'] = f"Budget warning: 90% threshold reached. Current cost ${current_month_cost:,.2f}"
+            elif budget_status['warning_80']:
+                budget_status['alert_level'] = 'medium'
+                budget_status['message'] = f"Budget alert: 80% threshold reached. Current cost ${current_month_cost:,.2f}"
+            else:
+                budget_status['alert_level'] = 'normal'
+                budget_status['message'] = f"Budget on track. Current cost ${current_month_cost:,.2f} of ${budget_amount:,.2f}"
+            
+            return budget_status
+            
+        except Exception as e:
+            logger.error(f"Error checking budget threshold: {str(e)}")
+            return {
+                'error': str(e),
+                'budget_amount': budget_amount,
+                'current_cost': current_month_cost,
+                'email': email
+            }
+
+    def send_budget_notification(self, budget_status: Dict[str, Any]) -> Dict[str, Any]:
+        """Send budget notification email"""
+        try:
+            email = budget_status['email']
+            alert_level = budget_status.get('alert_level', 'normal')
+            
+            # Skip sending if no alert needed
+            if alert_level == 'normal':
+                return {
+                    'sent': False,
+                    'reason': 'No alert threshold reached',
+                    'email': email
+                }
+            
+            # Check if email is verified
+            verification_status = self.verify_ses_email(email)
+            if not verification_status['verified']:
+                return {
+                    'sent': False,
+                    'reason': 'Email not verified with SES',
+                    'email': email,
+                    'verification_status': verification_status
+                }
+            
+            # Prepare email content
+            subject = self._get_notification_subject(alert_level, budget_status)
+            body_text, body_html = self._get_notification_body(budget_status)
+            
+            # Send email
+            response = self.ses_client.send_email(
+                Source=email,  # Must be verified email
+                Destination={'ToAddresses': [email]},
+                Message={
+                    'Subject': {'Data': subject, 'Charset': 'UTF-8'},
+                    'Body': {
+                        'Text': {'Data': body_text, 'Charset': 'UTF-8'},
+                        'Html': {'Data': body_html, 'Charset': 'UTF-8'}
+                    }
+                }
+            )
+            
+            logger.info(f"Budget notification sent to {email} - Alert Level: {alert_level}")
+            
+            return {
+                'sent': True,
+                'message_id': response['MessageId'],
+                'email': email,
+                'alert_level': alert_level,
+                'subject': subject
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to send budget notification: {str(e)}")
+            return {
+                'sent': False,
+                'error': str(e),
+                'email': budget_status.get('email', 'Unknown')
+            }
+
+    def _get_notification_subject(self, alert_level: str, budget_status: Dict[str, Any]) -> str:
+        """Generate email subject based on alert level"""
+        current_cost = budget_status['current_cost']
+        budget_amount = budget_status['budget_amount']
+        
+        subjects = {
+            'critical': f'AWS Budget EXCEEDED - ${current_cost:,.2f} of ${budget_amount:,.2f}',
+            'high': f'AWS Budget Alert - 90% Threshold Reached',
+            'medium': f'AWS Budget Warning - 80% Threshold Reached'
+        }
+        
+        return subjects.get(alert_level, 'AWS Budget Notification')
+
+    def _get_notification_body(self, budget_status: Dict[str, Any]) -> tuple:
+        """Generate email body content (text and HTML)"""
+        
+        # Extract data
+        budget_amount = budget_status['budget_amount']
+        current_cost = budget_status['current_cost']
+        remaining_budget = budget_status['remaining_budget']
+        threshold_percentage = budget_status['threshold_percentage']
+        alert_level = budget_status['alert_level']
+        timestamp = budget_status['timestamp']
+        
+        # Text version
+        text_body = f"""
+AWS Budget Notification
+
+Alert Level: {alert_level.upper()}
+Budget Amount: ${budget_amount:,.2f}
+Current Cost: ${current_cost:,.2f}
+Remaining Budget: ${remaining_budget:,.2f}
+Usage Percentage: {threshold_percentage:.1f}%
+
+{budget_status['message']}
+
+Generated at: {timestamp}
+
+This is an automated notification from AWS Cost Calculator & FinOps Tool.
+"""
+        
+        # HTML version
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background-color: #f4f4f4; padding: 20px; text-align: center; }}
+        .alert-critical {{ background-color: #d32f2f; color: white; }}
+        .alert-high {{ background-color: #f57c00; color: white; }}
+        .alert-medium {{ background-color: #fbc02d; color: black; }}
+        .content {{ padding: 20px; }}
+        .metrics {{ background-color: #f9f9f9; padding: 15px; margin: 15px 0; }}
+        .metric {{ margin: 10px 0; }}
+        .footer {{ font-size: 12px; color: #666; text-align: center; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header alert-{alert_level}">
+            <h2>AWS Budget Notification</h2>
+            <p><strong>{budget_status['message']}</strong></p>
+        </div>
+        
+        <div class="content">
+            <div class="metrics">
+                <div class="metric"><strong>Budget Amount:</strong> ${budget_amount:,.2f}</div>
+                <div class="metric"><strong>Current Cost:</strong> ${current_cost:,.2f}</div>
+                <div class="metric"><strong>Remaining Budget:</strong> ${remaining_budget:,.2f}</div>
+                <div class="metric"><strong>Usage Percentage:</strong> {threshold_percentage:.1f}%</div>
+            </div>
+            
+            <h3>Recommendations:</h3>
+            <ul>
+                <li>Review your AWS resource usage and optimize where possible</li>
+                <li>Check for unused or idle resources</li>
+                <li>Consider implementing cost controls and alerts</li>
+                <li>Use the AWS Cost Calculator tool for detailed analysis</li>
+            </ul>
+        </div>
+        
+        <div class="footer">
+            <p>Generated at: {timestamp}</p>
+            <p>This is an automated notification from AWS Cost Calculator & FinOps Tool.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        return text_body.strip(), html_body.strip()
+
+    def get_current_month_cost(self) -> float:
+        """Get current month's cost for budget comparison"""
+        try:
+            # Get current month dates
+            now = datetime.now()
+            start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            
+            # Get costs for current month
+            response = self.cost_explorer.get_cost_and_usage(
+                TimePeriod={
+                    'Start': start_of_month.strftime('%Y-%m-%d'),
+                    'End': now.strftime('%Y-%m-%d')
+                },
+                Granularity='MONTHLY',
+                Metrics=['BlendedCost']
+            )
+            
+            total_cost = 0
+            for result in response['ResultsByTime']:
+                cost = float(result['Total']['BlendedCost']['Amount'])
+                total_cost += cost
+            
+            return total_cost
+            
+        except Exception as e:
+            logger.error(f"Error getting current month cost: {str(e)}")
+            return 0.0
     
     def get_enhanced_usage_type_details(self, service_name: str, usage_type: str, month: str, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
         """

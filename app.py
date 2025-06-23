@@ -190,10 +190,10 @@ with config_tabs[1]:
                         'enabled': enable_notifications,
                         'email_verified': st.session_state.budget_settings.get('email_verified', False)
                     }
-                    st.success("✅ Budget settings saved successfully!")
+                    st.success("Budget settings saved successfully!")
                     st.rerun()
                 else:
-                    st.error("❌ Please enter a valid budget amount and email address")
+                    st.error("Please enter a valid budget amount and email address")
             except Exception as e:
                 st.error(f"Error saving settings: {str(e)}")
     
